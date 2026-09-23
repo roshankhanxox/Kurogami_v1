@@ -119,10 +119,10 @@ Current branches:
 
 | Branch | Owner | Scope |
 |---|---|---|
-| `feat/engine-core` | Roshan | `engine/*` — store, context, scheduler, backtrack, budget, runner |
-| `feat/planning-agents` | Chhandak | `agents/interpreter.py`, `agents/planner.py`, `agents/executor.py`, `prompts/*` |
-| `feat/verification-hitl` | Navneet | `agents/verifier.py`, `agents/rules.py`, `agents/localiser.py`, `engine/interrupt.py`, `cli/*`, `adapters/trace/*` |
-| `feat/bench-harness` | Srijan | `adapters/llm/*`, `adapters/search/*`, `bench/*` |
+| `feat/engine-core` | Engine Owner | `engine/*` — store, context, scheduler, backtrack, budget, runner |
+| `feat/planning-agents` | Planning Owner | `agents/interpreter.py`, `agents/planner.py`, `agents/executor.py`, `prompts/*` |
+| `feat/verification-hitl` | Verification Owner | `agents/verifier.py`, `agents/rules.py`, `agents/localiser.py`, `engine/interrupt.py`, `cli/*`, `adapters/trace/*` |
+| `feat/bench-harness` | Bench Owner | `adapters/llm/*`, `adapters/search/*`, `bench/*` |
 
 Naming:
 
@@ -171,7 +171,7 @@ caught. A PR must state:
 
 1. Which gate in `docs/CHECKPOINTS.md` it advances.
 2. Which tests prove it.
-3. Whether it touches `contracts/` (if yes → Roshan reviews, no exceptions).
+3. Whether it touches `contracts/` (if yes → Engine Owner reviews, no exceptions).
 
 `contracts/` is **frozen** once the foundation merges. Changing it breaks every
 other branch silently. If it truly must change, say so in the group chat *before*

@@ -37,7 +37,7 @@ them in Stage 1. Everything else in `contracts/` is load-bearing and cannot be c
 
 ## 2. Stage 1 — Parallel tracks
 
-### 🔴 G1 — Tree mechanism *(Roshan)* — **the most important gate in the project**
+### 🔴 G1 — Tree mechanism *(Engine Owner)* — **the most important gate in the project**
 
 ```bash
 pytest tests/engine -q
@@ -63,7 +63,7 @@ mechanism.
 
 ---
 
-### G2 — Real LLM round-trip + cache *(Srijan)*
+### G2 — Real LLM round-trip + cache *(Bench Owner)*
 
 ```bash
 kurogami interpret --text "I built an invoicing tool for freelance designers in India. Should I launch it?"
@@ -78,7 +78,7 @@ provider is enough for the demo.
 
 ---
 
-### G3 — Planner writes its own prompts *(Chhandak)*
+### G3 — Planner writes its own prompts *(Planning Owner)*
 
 ```bash
 kurogami plan --goal-file bench/goals/dev/g001.json --dry-run
@@ -96,7 +96,7 @@ depth 1, still honest — just say so.
 
 ---
 
-### G4 — Verdicts and traces *(Navneet)*
+### G4 — Verdicts and traces *(Verification Owner)*
 
 ```bash
 pytest tests/agents/test_rules.py tests/agents/test_verifier.py -q
@@ -231,10 +231,10 @@ computed over this table, not asserted."*
 
 | Member | 90 seconds on |
 |---|---|
-| Roshan | `invalidate_subtree` in the code, and why retry-in-place cannot fix a wrong premise |
-| Chhandak | a generated prompt, and how the planner is forced to produce depth over breadth |
-| Navneet | a FAIL verdict's `suspect_node_ids`, and the scripted interrupt mechanism |
-| Srijan | the trace schema, and how each Slide-9 metric is computed from it |
+| Engine Owner | `invalidate_subtree` in the code, and why retry-in-place cannot fix a wrong premise |
+| Planning Owner | a generated prompt, and how the planner is forced to produce depth over breadth |
+| Verification Owner | a FAIL verdict's `suspect_node_ids`, and the scripted interrupt mechanism |
+| Bench Owner | the trace schema, and how each Slide-9 metric is computed from it |
 
 ---
 
@@ -288,13 +288,13 @@ Those are Stage 4, and the timeline on Slide 10 says so.
 | Gate | Owner | Cleared | Notes |
 |---|---|---|---|
 | G0 Foundation 🔴 | all | | |
-| G1 Tree mechanism 🔴 | Roshan | | |
-| G2 LLM + cache | Srijan | | |
-| G3 Planner | Chhandak | | |
-| G4 Verdicts + trace | Navneet | | |
+| G1 Tree mechanism 🔴 | Engine Owner | | |
+| G2 LLM + cache | Bench Owner | | |
+| G3 Planner | Planning Owner | | |
+| G4 Verdicts + trace | Verification Owner | | |
 | G5 Integration 🔴 | all | | |
 | G6 Demo run 🔴 | all | | |
-| G7 Reproducibility | Navneet | | |
+| G7 Reproducibility | Verification Owner | | |
 | G8 Freeze 🔴 | all | | |
 
 ---

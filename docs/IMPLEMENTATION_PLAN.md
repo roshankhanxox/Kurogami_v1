@@ -3,7 +3,7 @@
 > **Structure:** this plan is ordered by **dependency**, not by calendar. Stages
 > run in sequence; tracks inside a stage run in parallel. A stage is finished when
 > its gate in `docs/CHECKPOINTS.md` passes — not when time runs out.
-> **Team:** Roshan, Chhandak, Navneet, Srijan.
+> **Team:** Engine Owner, Planning Owner, Verification Owner, Bench Owner.
 
 ---
 
@@ -40,12 +40,12 @@ in parallel; nothing before it can.
 
 | # | Task | Who | Done when |
 |---|---|---|---|
-| 1 | `git init`, `pyproject.toml`, package skeleton, `.env.example`, `.gitignore` | Roshan | `pip install -e ".[dev]"` succeeds |
-| 2 | Write **every file in `contracts/`** — verbatim from ARCHITECTURE.md §4 | Roshan drives, all 4 in the room | `pytest tests/contracts` green |
+| 1 | `git init`, `pyproject.toml`, package skeleton, `.env.example`, `.gitignore` | Engine Owner | `pip install -e ".[dev]"` succeeds |
+| 2 | Write **every file in `contracts/`** — verbatim from ARCHITECTURE.md §4 | Engine Owner drives, all 4 in the room | `pytest tests/contracts` green |
 | 3 | Write **every `Protocol` in `contracts/ports.py`** | same | models import cleanly |
-| 4 | Write `FakeLLM` returning canned structured responses | Srijan | `FakeLLM().complete(...)` returns a parsed model |
+| 4 | Write `FakeLLM` returning canned structured responses | Bench Owner | `FakeLLM().complete(...)` returns a parsed model |
 | 5 | Agree the demo goal, write it down, **never change it** | all | committed to `bench/goals/dev/g001.json` |
-| 6 | Create the four feature branches (§0.3) | Roshan | branches pushed |
+| 6 | Create the four feature branches (§0.3) | Engine Owner | branches pushed |
 
 ### 0.1 The demo goal — freeze this immediately
 
@@ -67,7 +67,7 @@ python -c "from kurogami.contracts import NodeSpec, Verdict, TraceRecord"
 ### 0.2 Contracts freeze rule
 
 Once Stage 0 merges, `contracts/` is **frozen**. A change requires a PR that
-Roshan reviews, because every other branch is built on those types. One person
+Engine Owner reviews, because every other branch is built on those types. One person
 quietly editing `NodeSpec` breaks three other branches silently. This rule is the
 difference between four parallel workstreams and four merge conflicts.
 
@@ -79,10 +79,10 @@ maps directly onto Slide 11's "what each member personally demonstrates."
 
 ```
 main
-├── feat/engine-core          Roshan    store, context, scheduler, backtrack, runner, budget
-├── feat/planning-agents      Chhandak  interpreter, planner, prompt pack
-├── feat/verification-hitl    Navneet   verifier, rules, localiser, interrupt, CLI, trace
-└── feat/bench-harness        Srijan    LLM adapters, dev goals, harness skeleton, metrics
+├── feat/engine-core          Engine Owner          store, context, scheduler, backtrack, runner, budget
+├── feat/planning-agents      Planning Owner        interpreter, planner, prompt pack
+├── feat/verification-hitl    Verification Owner    verifier, rules, localiser, interrupt, CLI, trace
+└── feat/bench-harness        Bench Owner           LLM adapters, dev goals, harness skeleton, metrics
 ```
 
 Merge order in Stage 2 is **engine → planning → verification → bench**, because
@@ -95,7 +95,7 @@ that is the dependency order. See CLAUDE.md §4 for the full git protocol.
 Each track below is written so its owner can work alone against `contracts/` with
 `FakeLLM`, touching no one else's files.
 
-### Track A — `feat/engine-core` · Roshan
+### Track A — `feat/engine-core` · Engine Owner
 
 **Goal: the tree mechanism works with zero LLM calls.**
 
@@ -124,7 +124,7 @@ python -m kurogami.engine.demo_tree   # prints fixture tree, forces a FAIL at
 people work on it. There is no demo without it — everything else is decoration
 around this mechanism.
 
-### Track B — `feat/planning-agents` · Chhandak
+### Track B — `feat/planning-agents` · Planning Owner
 
 **Goal: an LLM writes child-agent prompts, unaided, and they are well-formed.**
 
@@ -155,7 +155,7 @@ kurogami plan --goal-file bench/goals/dev/g001.json --dry-run
 prints a tree of depth ≥ 4, ≥ 10 nodes, every node carrying a non-trivial
 generated prompt and a pass condition that names an ancestor.
 
-### Track C — `feat/verification-hitl` · Navneet
+### Track C — `feat/verification-hitl` · Verification Owner
 
 **Goal: FAIL verdicts that name the right culprit, and a human can interject.**
 
@@ -184,7 +184,7 @@ typing on stage is a liability. Have both, demo the scripted one.
 populated `suspect_node_ids`, and `traces/*.jsonl` contains a record matching the
 Slide-7 schema field-for-field.
 
-### Track D — `feat/bench-harness` · Srijan
+### Track D — `feat/bench-harness` · Bench Owner
 
 **Goal: the system can be driven reproducibly, and cheaply.**
 
@@ -238,11 +238,11 @@ Correctness of *content* does not matter yet — only that it runs to completion
 | # | Task | Who | Why it matters |
 |---|---|---|---|
 | 1 | Run g001 end-to-end on real models, repeatedly, until it produces a depth-≥4 tree with a **genuine** verifier FAIL | all | this *is* the demo |
-| 2 | If no genuine failure appears after several runs, enable `--inject-fault <node_id>` as the fallback and **say so at the viva** | Roshan | honesty beats a rigged demo |
-| 3 | Tune `prompts/expand.md` until depth ≥ 4 is reliable across 3 consecutive runs | Chhandak | Slide 3 promised depth ≥ 4 |
-| 4 | Warm the cache: run the demo goal a few times so the demo is cache-served | Srijan | insurance |
-| 5 | Record a terminal capture (`asciinema` or screen recording) of a successful run | Navneet | Slide 13 already asks whether recorded is acceptable |
-| 6 | `kurogami replay traces/<run>.jsonl` renders the tree from disk | Navneet | offline fallback |
+| 2 | If no genuine failure appears after several runs, enable `--inject-fault <node_id>` as the fallback and **say so at the viva** | Engine Owner | honesty beats a rigged demo |
+| 3 | Tune `prompts/expand.md` until depth ≥ 4 is reliable across 3 consecutive runs | Planning Owner | Slide 3 promised depth ≥ 4 |
+| 4 | Warm the cache: run the demo goal a few times so the demo is cache-served | Bench Owner | insurance |
+| 5 | Record a terminal capture (`asciinema` or screen recording) of a successful run | Verification Owner | Slide 13 already asks whether recorded is acceptable |
+| 6 | `kurogami replay traces/<run>.jsonl` renders the tree from disk | Verification Owner | offline fallback |
 
 ### Freeze and rehearse
 

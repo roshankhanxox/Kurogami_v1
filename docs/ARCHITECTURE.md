@@ -368,23 +368,23 @@ accounting deduplicates these (Slide 7's stated preprocessing step).
 
 | Module | Owner | Public surface | Depends on | Testable without network? |
 |---|---|---|---|---|
-| `contracts/*` | **Roshan** (written first, then frozen) | the models above | nothing | n/a |
-| `engine/store.py` | Roshan | `TreeStore` | contracts | ✅ pure |
-| `engine/backtrack.py` | Roshan | `locate_and_invalidate()` | contracts, store | ✅ pure |
-| `engine/runner.py` | Roshan | `Runner.run(goal) -> RunReport` | all ports | ✅ FakeLLM |
-| `agents/interpreter.py` | **Chhandak** | `Interpreter(llm).run(str) -> GoalSpec` | LLMPort | ✅ FakeLLM |
-| `agents/planner.py` | Chhandak | `Planner(llm).plan()`, `.expand()` | LLMPort | ✅ FakeLLM |
-| `prompts/*` | Chhandak | data files | — | ✅ |
-| `agents/verifier.py` | **Navneet** | `Verifier(llm).check() -> Verdict` | LLMPort | ✅ FakeLLM |
-| `agents/rules.py` | Navneet | `RuleChecker.check() -> Verdict` | contracts | ✅ pure |
-| `engine/interrupt.py` | Navneet | `CliInterrupt`, `ScriptedInterrupt` | contracts | ✅ scripted |
-| `cli/*`, `adapters/trace/*` | Navneet | `kurogami run/replay/bench` | everything | ✅ |
-| `bench/*` | **Srijan** | `harness.run_suite()`, `metrics.compute()` | contracts, runner | ✅ |
-| `adapters/llm/*` | Srijan | `AnthropicLLM`, `OpenAILLM`, `FakeLLM`, `CachedLLM` | LLMPort | ✅ |
+| `contracts/*` | **Engine Owner** (written first, then frozen) | the models above | nothing | n/a |
+| `engine/store.py` | Engine Owner | `TreeStore` | contracts | ✅ pure |
+| `engine/backtrack.py` | Engine Owner | `locate_and_invalidate()` | contracts, store | ✅ pure |
+| `engine/runner.py` | Engine Owner | `Runner.run(goal) -> RunReport` | all ports | ✅ FakeLLM |
+| `agents/interpreter.py` | **Planning Owner** | `Interpreter(llm).run(str) -> GoalSpec` | LLMPort | ✅ FakeLLM |
+| `agents/planner.py` | Planning Owner | `Planner(llm).plan()`, `.expand()` | LLMPort | ✅ FakeLLM |
+| `prompts/*` | Planning Owner | data files | — | ✅ |
+| `agents/verifier.py` | **Verification Owner** | `Verifier(llm).check() -> Verdict` | LLMPort | ✅ FakeLLM |
+| `agents/rules.py` | Verification Owner | `RuleChecker.check() -> Verdict` | contracts | ✅ pure |
+| `engine/interrupt.py` | Verification Owner | `CliInterrupt`, `ScriptedInterrupt` | contracts | ✅ scripted |
+| `cli/*`, `adapters/trace/*` | Verification Owner | `kurogami run/replay/bench` | everything | ✅ |
+| `bench/*` | **Bench Owner** | `harness.run_suite()`, `metrics.compute()` | contracts, runner | ✅ |
+| `adapters/llm/*` | Bench Owner | `AnthropicLLM`, `OpenAILLM`, `FakeLLM`, `CachedLLM` | LLMPort | ✅ |
 
 **The seam discipline:** once the contracts are frozen, no two people edit the same
 file. Every workstream talks to the others only through `contracts/`. If you need a
-contract changed, it is a PR against `contracts/` reviewed by Roshan — not an edit
+contract changed, it is a PR against `contracts/` reviewed by Engine Owner — not an edit
 in passing.
 
 ---
