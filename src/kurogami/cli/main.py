@@ -17,6 +17,7 @@ from rich.console import Console
 from kurogami.adapters.llm.cached import CachedLLM
 from kurogami.adapters.llm.fake import FakeLLM
 from kurogami.adapters.llm.openai import DEFAULT_MODEL, OpenAILLM
+from kurogami.adapters.llm.recording import RecordingLLM
 from kurogami.adapters.search.fake import FakeSearch
 from kurogami.adapters.trace.jsonl import JsonlTraceSink
 from kurogami.agents.executor import Executor
@@ -98,9 +99,12 @@ def plan(
     fake_script: Annotated[Path | None, typer.Option("--fake-script")] = None,
     no_cache: Annotated[bool, typer.Option("--no-cache")] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+    trace_dir: Annotated[Path, typer.Option("--trace-dir")] = Path("traces"),
 ) -> None:
     """Interpret a goal file and print the Master's complete planned tree (Gate G3)."""
-    llm_port = _build_llm(llm, fake_script, model=model, no_cache=no_cache)
+    calls_log = trace_dir / f"plan-{uuid.uuid4()}.calls.jsonl"
+    llm_port = RecordingLLM(_build_llm(llm, fake_script, model=model, no_cache=no_cache), calls_log)
+    console.print(f"every LLM call is recorded in {calls_log}")
     goal_spec = Interpreter(llm_port).run(_load_raw_text(goal_file))
     try:
         blueprint = Planner(llm_port).plan(goal_spec)
@@ -133,13 +137,14 @@ def run_cmd(
     verbose: Annotated[bool, typer.Option("--verbose")] = False,
 ) -> None:
     """Run the full loop end to end and write a JSONL trace."""
-    llm_port = _build_llm(llm, fake_script, model=model, no_cache=no_cache)
-    search_port = _build_search(search)
-    interrupt_port = CliInterrupt(interrupt_at) if interrupt_at else ScriptedInterrupt([])
-
     trace_dir.mkdir(parents=True, exist_ok=True)
     trace_path = trace_dir / f"{uuid.uuid4()}.jsonl"
     trace_sink = JsonlTraceSink(trace_path)
+    calls_log = trace_path.with_suffix(".calls.jsonl")
+
+    llm_port = RecordingLLM(_build_llm(llm, fake_script, model=model, no_cache=no_cache), calls_log)
+    search_port = _build_search(search)
+    interrupt_port = CliInterrupt(interrupt_at) if interrupt_at else ScriptedInterrupt([])
 
     runner = Runner(
         interpreter=Interpreter(llm_port),
@@ -156,6 +161,7 @@ def run_cmd(
     if verbose:
         render_tree(report.snapshot, console, title=_load_raw_text(goal_file))
     console.print(f"trace written to {trace_path}")
+    console.print(f"every LLM call is recorded in {calls_log}")
 
     if report.aborted_reason:
         console.print(f"[bold red]{report.aborted_reason}[/bold red]")

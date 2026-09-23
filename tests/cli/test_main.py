@@ -130,7 +130,7 @@ def _goal_file(tmp_path: Path) -> Path:
 
 
 def _trace_records(trace_dir: Path) -> list[dict]:
-    [trace_file] = list(trace_dir.glob("*.jsonl"))
+    [trace_file] = [f for f in trace_dir.glob("*.jsonl") if not f.name.endswith(".calls.jsonl")]
     return [json.loads(line) for line in trace_file.read_text().splitlines() if line.strip()]
 
 
@@ -148,7 +148,10 @@ def test_interpret_command_prints_the_goal_spec(tmp_path):
 def test_plan_dry_run_prints_the_whole_planned_tree(tmp_path, use_llm):
     llm = use_llm(_fake())
 
-    result = runner.invoke(app, ["plan", "--goal-file", str(_goal_file(tmp_path)), "--dry-run"])
+    result = runner.invoke(
+        app,
+        ["plan", "--goal-file", str(_goal_file(tmp_path)), "--dry-run", "--trace-dir", str(tmp_path)],
+    )
 
     assert result.exit_code == 0, result.stdout
     assert "10 planned node(s), max depth 5" in result.stdout
@@ -156,11 +159,28 @@ def test_plan_dry_run_prints_the_whole_planned_tree(tmp_path, use_llm):
     assert "text" not in llm.calls  # nothing executed
 
 
+def test_plan_records_every_llm_call(tmp_path, use_llm):
+    use_llm(_fake())
+    trace_dir = tmp_path / "traces"
+
+    runner.invoke(
+        app,
+        ["plan", "--goal-file", str(_goal_file(tmp_path)), "--dry-run", "--trace-dir", str(trace_dir)],
+    )
+
+    [log] = list(trace_dir.glob("plan-*.calls.jsonl"))
+    schemas = [json.loads(line)["schema"] for line in log.read_text().splitlines()]
+    assert schemas == ["GoalSpec", "_Scope", "_Blueprint"]
+
+
 def test_plan_reports_a_plan_that_cannot_be_made(tmp_path, use_llm):
     cyclic = _scope({**_SHAPE, "a0": ("research", ["a3"])})
     use_llm(_fake(scope=cyclic))
 
-    result = runner.invoke(app, ["plan", "--goal-file", str(_goal_file(tmp_path)), "--dry-run"])
+    result = runner.invoke(
+        app,
+        ["plan", "--goal-file", str(_goal_file(tmp_path)), "--dry-run", "--trace-dir", str(tmp_path)],
+    )
 
     assert result.exit_code == 1
     assert "planning failed" in result.stdout
