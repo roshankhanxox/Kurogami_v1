@@ -33,6 +33,8 @@ _ALLOWED_NODE_TYPES = (
     ast.GtE,
     ast.In,
     ast.NotIn,
+    ast.Is,
+    ast.IsNot,
     ast.Call,
     ast.Name,
     ast.Load,
@@ -83,7 +85,12 @@ class RuleChecker:
         for assertion in node.pass_condition.assertions:
             try:
                 passed = _safe_eval(assertion, result.structured, node.context)
-            except UnsafeAssertionError as exc:
+            except (UnsafeAssertionError, SyntaxError) as exc:
+                # SyntaxError means the planner wrote a natural-language sentence
+                # instead of a Python expression (seen live against a real LLM,
+                # e.g. "The output includes a summary of current tools used...").
+                # Same bucket as UnsafeAssertionError: the assertion string itself
+                # is malformed, not a runtime failure against valid data.
                 return self._fail(node, "schema", str(exc), assertion)
             except (TypeError, KeyError, IndexError, ValueError, ZeroDivisionError) as exc:
                 return self._fail(
