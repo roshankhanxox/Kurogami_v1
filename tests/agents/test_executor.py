@@ -109,10 +109,49 @@ def test_executor_asks_for_the_keys_its_own_assertions_reference():
     assert "```json" in llm.last_prompt
 
 
-def test_executor_adds_no_json_instruction_when_there_are_no_assertions():
+def test_executor_shows_the_exact_assertions_so_value_shapes_match():
+    """Regression: seen live -- the model returned user_feedback as a single
+    string where the assertion needed a list; knowing only key names wasn't
+    enough to get the shape right.
+    """
+    assertion = "len(structured['user_feedback']) >= 3"
+    node = _node(pass_condition=PassCondition(assertions=[assertion], semantic_check="ok?"))
+    llm = _CapturingLLM()
+    Executor(llm).run(node)
+    assert assertion in llm.last_prompt
+
+
+def test_executor_forbids_nesting_required_keys_under_a_wrapper():
+    """Regression: seen live -- the model produced
+    {"feasibility_analysis": {"feature_1": ..., "total_estimated_time": ...}}
+    instead of putting the required keys at the top level, so a flat
+    structured[...] assertion still raised KeyError.
+    """
+    node = _node(
+        pass_condition=PassCondition(
+            assertions=["structured['total_estimated_time'] is not None"],
+            semantic_check="ok?",
+        )
+    )
+    llm = _CapturingLLM()
+    Executor(llm).run(node)
+
+    assert "TOP level" in llm.last_prompt
+    assert "do not nest" in llm.last_prompt
+
+
+def test_executor_adds_no_required_keys_when_there_are_no_assertions():
     llm = _CapturingLLM()
     Executor(llm).run(_node())
-    assert "fenced JSON" not in llm.last_prompt
+    assert "exactly these keys" not in llm.last_prompt
+
+
+def test_executor_always_lets_a_node_report_missing_prerequisites():
+    """The only trigger for runtime gap-filling -- offered even with no assertions."""
+    llm = _CapturingLLM()
+    Executor(llm).run(_node())
+    assert "fenced JSON" in llm.last_prompt
+    assert "missing_prerequisites" in llm.last_prompt
 
 
 def test_executor_prompt_version_is_stable_for_an_identical_prompt():
@@ -128,3 +167,34 @@ def test_executor_prompt_version_differs_for_different_prompts():
     r1 = Executor(llm).run(_node(generated_prompt="prompt one"))
     r2 = Executor(llm).run(_node(generated_prompt="prompt two"))
     assert r1.prompt_version != r2.prompt_version
+
+
+def test_executor_finds_keys_read_through_get_and_membership():
+    """Live incident: once `.get` was allowed, a subscript-only regex missed
+    `structured.get('competitors')`, the model was never told the key, named it
+    `tools`, and all three live runs failed on it."""
+    assertions = [
+        "isinstance(structured.get('competitors'), list)",
+        "all(key in structured for key in ['budget_limit', 'timeline'])",
+        "'risks' in structured",
+        "len(structured['tiers']) >= 2",
+    ]
+    assert Executor._required_structured_keys(assertions) == [
+        "competitors", "budget_limit", "timeline", "risks", "tiers",
+    ]
+
+
+def test_only_the_iterated_key_list_counts_as_required_keys():
+    """A value list elsewhere in the assertion must not become 'required keys'."""
+    assertions = [
+        "all(k in structured for k in ['tier']) and structured['tier'] in ['low', 'high']"
+    ]
+    assert Executor._required_structured_keys(assertions) == ["tier"]
+
+
+def test_assertions_without_keys_are_shown_without_an_empty_key_list():
+    node = _node(pass_condition=PassCondition(assertions=["len(context) >= 0"], semantic_check="?"))
+    llm = _CapturingLLM()
+    Executor(llm).run(node)
+    assert "len(context) >= 0" in llm.last_prompt
+    assert "exactly these keys" not in llm.last_prompt

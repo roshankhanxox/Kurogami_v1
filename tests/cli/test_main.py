@@ -1,259 +1,241 @@
-"""CLI integration, offline via --fake-script. No network, no real LLM.
+"""CLI integration, offline. No network, no real LLM.
 
-FakeLLM keys responses by exact prompt text, so a multi-hop scenario (where
-a later prompt embeds an earlier NodeResult, e.g. planner.expand) needs that
-embedded JSON to match byte-for-byte. Rather than hand-computing hashes and
-word counts, these tests precompute the expected artifacts by running the
-same production code (Executor) once in the test's own setup -- since it's
-pure and deterministic (latency is monkeypatched to zero), that precomputed
-value is guaranteed to equal whatever the CLI's own internal call produces.
+`interpret` is driven through the real --fake-script path (FakeLLM keyed by exact
+prompt text). `plan` and `run` make a dozen-plus calls whose prompts embed earlier
+outputs, so exact-text keying would be brittle; for those the composition root's
+LLM is replaced by a fake that answers by *which schema is being asked for*. The
+Interpreter, Planner, Executor, RuleChecker, Verifier and Runner are all real.
 """
 
 import json
 from pathlib import Path
+from typing import Any
+from uuid import uuid4
 
+import pytest
 from typer.testing import CliRunner
 
-from kurogami.adapters.llm.fake import FakeLLM
 from kurogami.agents._prompt_loader import load_prompt
-from kurogami.agents.executor import Executor
+from kurogami.cli import main as cli_main
 from kurogami.cli.main import app
-from kurogami.contracts import GoalSpec, NodeKind, NodeSpec, PassCondition
+from kurogami.contracts import LLMResponse, TraceRecord
 
 runner = CliRunner()
 
+RAW_TEXT = "Should I launch my invoicing tool?"
 
-def _write_script(tmp_path: Path, responses: dict) -> Path:
-    path = tmp_path / "script.json"
-    path.write_text(json.dumps(responses))
-    return path
+# 10 items, one decision sink, longest chain a0-a1-c0-c1-c2-final (depth 5).
+_SHAPE = {
+    "a0": ("research", []),
+    "a1": ("analysis", ["a0"]),
+    "a2": ("analysis", ["a1"]),
+    "a3": ("analysis", ["a2"]),
+    "b0": ("research", []),
+    "b1": ("analysis", ["b0"]),
+    "c0": ("analysis", ["a1"]),
+    "c1": ("synthesis", ["c0", "b1"]),
+    "c2": ("analysis", ["c1"]),
+    "final": ("decision", ["a3", "c2"]),
+}
 
 
-def _goal_file(tmp_path: Path, raw_text: str) -> Path:
-    path = tmp_path / "goal.json"
-    path.write_text(json.dumps({"raw_text": raw_text}))
-    return path
-
-
-def _goal_dict(raw_text: str) -> dict:
+def _goal_dict() -> dict:
     return {
-        "raw_text": raw_text,
+        "raw_text": RAW_TEXT,
         "product_description": "Invoicing tool for freelance designers.",
         "target_market": "Freelance designers in India",
-        "decision_type": "market_entry",
+        "decision_type": "launch",
         "success_definition": "A clear go/no-go.",
     }
 
 
+def _stage(shape: dict, i: str, seen: frozenset = frozenset()) -> int:
+    deps = [d for d in shape[i][1] if d in shape and d not in seen]
+    return 1 + max((_stage(shape, d, seen | {i}) for d in deps), default=0)
+
+
+def _scope(shape: dict = _SHAPE) -> dict:
+    return {
+        "items": [
+            {"id": i, "question": f"{i}?", "kind": kind, "stage": _stage(shape, i), "depends_on": deps}
+            for i, (kind, deps) in shape.items()
+        ]
+    }
+
+
+def _blueprint(assertions: dict[str, list[str]] | None = None) -> dict:
+    assertions = assertions or {}
+    return {
+        "nodes": [
+            {
+                "node_id": i,
+                "title": i,
+                "node_goal": f"goal {i}",
+                "generated_prompt": f"prompt for {i} " * 15,
+                "pass_condition": {
+                    "assertions": assertions.get(i, []),
+                    "semantic_check": f"Consistent with {deps[0]}?" if deps else "Answered?",
+                },
+            }
+            for i, (_, deps) in _SHAPE.items()
+        ]
+    }
+
+
+class _SchemaFakeLLM:
+    """Answers by the requested schema's name; free-text calls get a minimal JSON block."""
+
+    def __init__(self, by_schema: dict[str, Any]) -> None:
+        self._by_schema = by_schema
+        self.calls: list[str] = []
+
+    def complete(self, *, prompt, system=None, schema=None, temperature=0.0):
+        name = schema.__name__ if schema is not None else "text"
+        self.calls.append(name)
+        if schema is None:
+            text = "Analysis.\n```json\n{}\n```"
+            return LLMResponse(text=text, tokens_in=1, tokens_out=1, latency_ms=0, model_id="fake")
+        parsed = schema.model_validate(self._by_schema[name])
+        return LLMResponse(
+            text=parsed.model_dump_json(), parsed=parsed, tokens_in=1, tokens_out=1,
+            latency_ms=0, model_id="fake",
+        )
+
+
+def _fake(scope: dict | None = None, blueprint: dict | None = None) -> _SchemaFakeLLM:
+    return _SchemaFakeLLM(
+        {
+            "GoalSpec": _goal_dict(),
+            "_Scope": scope or _scope(),
+            "_Blueprint": blueprint or _blueprint(),
+            "_VerifyResponse": {"verdict": "PASS", "reason": None},
+            "_GapFill": {"node": None},
+        }
+    )
+
+
+@pytest.fixture
+def use_llm(monkeypatch):
+    def install(llm: _SchemaFakeLLM) -> _SchemaFakeLLM:
+        monkeypatch.setattr(cli_main, "_build_llm", lambda *args, **kwargs: llm)
+        return llm
+
+    return install
+
+
+def _goal_file(tmp_path: Path) -> Path:
+    path = tmp_path / "goal.json"
+    path.write_text(json.dumps({"raw_text": RAW_TEXT}))
+    return path
+
+
+def _trace_records(trace_dir: Path) -> list[dict]:
+    [trace_file] = [f for f in trace_dir.glob("*.jsonl") if not f.name.endswith(".calls.jsonl")]
+    return [json.loads(line) for line in trace_file.read_text().splitlines() if line.strip()]
+
+
 def test_interpret_command_prints_the_goal_spec(tmp_path):
-    raw_text = "Should I launch my invoicing tool?"
-    goal_dict = _goal_dict(raw_text)
-    interpret_prompt = load_prompt("interpret").format(raw_text=raw_text)
-    script = _write_script(tmp_path, {interpret_prompt: goal_dict})
+    interpret_prompt = load_prompt("interpret").format(raw_text=RAW_TEXT)
+    script = tmp_path / "script.json"
+    script.write_text(json.dumps({interpret_prompt: _goal_dict()}))
 
-    result = runner.invoke(app, ["interpret", "--text", raw_text, "--fake-script", str(script)])
-
-    assert result.exit_code == 0
-    assert "market_entry" in result.stdout
-
-
-def test_plan_dry_run_prints_root_nodes(tmp_path):
-    raw_text = "Should I launch my invoicing tool?"
-    goal_dict = _goal_dict(raw_text)
-    goal_obj = GoalSpec(**goal_dict)
-    root_dict = {
-        "node_id": "n_a",
-        "parent_ids": [],
-        "depth": 0,
-        "kind": "analysis",
-        "title": "root",
-        "node_goal": "root goal",
-        "generated_prompt": "a" * 50,
-        "pass_condition": {"assertions": [], "semantic_check": "ok?"},
-    }
-    interpret_prompt = load_prompt("interpret").format(raw_text=raw_text)
-    plan_prompt = load_prompt("plan").format(goal_json=goal_obj.model_dump_json(indent=2))
-    script = _write_script(
-        tmp_path,
-        {interpret_prompt: goal_dict, plan_prompt: {"nodes": [root_dict]}},
-    )
-    goal_file = _goal_file(tmp_path, raw_text)
-
-    result = runner.invoke(
-        app, ["plan", "--goal-file", str(goal_file), "--fake-script", str(script), "--dry-run"]
-    )
+    result = runner.invoke(app, ["interpret", "--text", RAW_TEXT, "--fake-script", str(script)])
 
     assert result.exit_code == 0
-    assert "n_a" in result.stdout
-    assert "1 root node" in result.stdout
+    assert "launch" in result.stdout
 
 
-def test_run_command_fails_backtracks_and_breaches_budget_cleanly(tmp_path):
-    """A root node whose assertion is always false: FAIL -> backtrack to self (no
-    ancestors) -> requeue -> FAIL again, forever, until the budget stops it.
-    No expand() or verify() call is ever reached, so this needs no NodeResult
-    to be embedded in a further prompt.
-
-    The runner feeds the backtrack reason back into the retried node's
-    context (by design -- a retried node should see why it failed), which
-    changes the executor prompt from the second attempt onward. Both prompt
-    variants need a registered response.
-    """
-    raw_text = "Should I launch my invoicing tool?"
-    goal_dict = _goal_dict(raw_text)
-    goal_obj = GoalSpec(**goal_dict)
-    root_dict = {
-        "node_id": "n_a",
-        "parent_ids": [],
-        "depth": 0,
-        "kind": "analysis",
-        "title": "root",
-        "node_goal": "root goal",
-        "generated_prompt": "always fails its own assertion",
-        "pass_condition": {"assertions": ["False"], "semantic_check": "ok?"},
-    }
-    root_node = NodeSpec(
-        node_id="n_a",
-        parent_ids=[],
-        depth=0,
-        kind=NodeKind.ANALYSIS,
-        title="root",
-        node_goal="root goal",
-        generated_prompt=root_dict["generated_prompt"],
-        pass_condition=PassCondition(assertions=["False"], semantic_check="ok?"),
-    )
-    retried_node = root_node.model_copy(
-        update={"context": {"_backtrack_reason": "a deterministic assertion failed"}}
-    )
-    # Executor._build_prompt is "private" but pure (no self.* access besides
-    # search, unused for an ANALYSIS node), so calling it directly here
-    # mirrors exactly what the real second-attempt call will send.
-    retried_prompt = Executor(llm=None)._build_prompt(retried_node)
-
-    interpret_prompt = load_prompt("interpret").format(raw_text=raw_text)
-    plan_prompt = load_prompt("plan").format(goal_json=goal_obj.model_dump_json(indent=2))
-    script = _write_script(
-        tmp_path,
-        {
-            interpret_prompt: goal_dict,
-            plan_prompt: {"nodes": [root_dict]},
-            "always fails its own assertion": "some executor output",
-            retried_prompt: "some executor output",
-        },
-    )
-    goal_file = _goal_file(tmp_path, raw_text)
-    trace_dir = tmp_path / "traces"
+def test_plan_dry_run_prints_the_whole_planned_tree(tmp_path, use_llm):
+    llm = use_llm(_fake())
 
     result = runner.invoke(
         app,
-        [
-            "run",
-            "--goal-file", str(goal_file),
-            "--fake-script", str(script),
-            "--trace-dir", str(trace_dir),
-        ],
-    )
-
-    assert result.exit_code == 1
-    assert "budget breached" in result.stdout
-
-    trace_files = list(trace_dir.glob("*.jsonl"))
-    assert len(trace_files) == 1
-    lines = [line for line in trace_files[0].read_text().splitlines() if line.strip()]
-    assert len(lines) >= 2  # at least one FAIL record plus the terminal budget-breach record
-    assert '"verifier_verdict":"FAIL"' in lines[0] or '"verifier_verdict": "FAIL"' in lines[0]
-
-
-def test_run_command_happy_path_single_node(tmp_path, monkeypatch):
-    """A root node with no assertions, a PASS verifier, and expand() returning
-    zero children -- the simplest possible successful run.
-    """
-    monkeypatch.setattr("kurogami.agents.executor.time.monotonic", lambda: 0.0)
-
-    raw_text = "Should I launch my invoicing tool?"
-    goal_dict = _goal_dict(raw_text)
-    goal_obj = GoalSpec(**goal_dict)
-    root_dict = {
-        "node_id": "n_a",
-        "parent_ids": [],
-        "depth": 0,
-        "kind": "analysis",
-        "title": "root",
-        "node_goal": "root goal",
-        "generated_prompt": "a sufficiently long generated prompt for the root node",
-        "pass_condition": {"assertions": [], "semantic_check": "ok?"},
-    }
-    root_node = NodeSpec(
-        node_id="n_a",
-        parent_ids=[],
-        depth=0,
-        kind=NodeKind.ANALYSIS,
-        title="root",
-        node_goal="root goal",
-        generated_prompt=root_dict["generated_prompt"],
-        pass_condition=PassCondition(assertions=[], semantic_check="ok?"),
-    )
-    executor_text = '{"ok": true}'
-
-    # Precompute the NodeResult the real Executor will produce, using the same
-    # code the CLI invocation below will independently call -- deterministic
-    # given the monkeypatched clock, so this is guaranteed to match exactly.
-    setup_llm = FakeLLM(responses={root_node.generated_prompt: executor_text})
-    expected_result = Executor(setup_llm).run(root_node)
-
-    interpret_prompt = load_prompt("interpret").format(raw_text=raw_text)
-    plan_prompt = load_prompt("plan").format(goal_json=goal_obj.model_dump_json(indent=2))
-    verify_prompt = load_prompt("verify").format(
-        node_json=root_node.model_dump_json(indent=2),
-        result_json=expected_result.model_dump_json(indent=2),
-        context_json=json.dumps({}, indent=2),
-        semantic_check="ok?",
-    )
-    expand_prompt = load_prompt("expand").format(
-        parent_json=root_node.model_dump_json(indent=2),
-        result_json=expected_result.model_dump_json(indent=2),
-        goal_json=goal_obj.model_dump_json(indent=2),
-    )
-
-    script = _write_script(
-        tmp_path,
-        {
-            interpret_prompt: goal_dict,
-            plan_prompt: {"nodes": [root_dict]},
-            root_node.generated_prompt: executor_text,
-            verify_prompt: {"verdict": "PASS"},
-            expand_prompt: {"nodes": []},
-        },
-    )
-    goal_file = _goal_file(tmp_path, raw_text)
-    trace_dir = tmp_path / "traces"
-
-    result = runner.invoke(
-        app,
-        [
-            "run",
-            "--goal-file", str(goal_file),
-            "--fake-script", str(script),
-            "--trace-dir", str(trace_dir),
-            "--verbose",
-        ],
+        ["plan", "--goal-file", str(_goal_file(tmp_path)), "--dry-run", "--trace-dir", str(tmp_path)],
     )
 
     assert result.exit_code == 0, result.stdout
-    assert "n_a" in result.stdout
+    assert "10 planned node(s), max depth 5" in result.stdout
+    assert "final" in result.stdout
+    assert "text" not in llm.calls  # nothing executed
 
-    trace_files = list(trace_dir.glob("*.jsonl"))
-    assert len(trace_files) == 1
-    lines = [line for line in trace_files[0].read_text().splitlines() if line.strip()]
-    assert len(lines) == 1
-    assert json.loads(lines[0])["verifier_verdict"] == "PASS"
+
+def test_plan_records_every_llm_call(tmp_path, use_llm):
+    use_llm(_fake())
+    trace_dir = tmp_path / "traces"
+
+    runner.invoke(
+        app,
+        ["plan", "--goal-file", str(_goal_file(tmp_path)), "--dry-run", "--trace-dir", str(trace_dir)],
+    )
+
+    [log] = list(trace_dir.glob("plan-*.calls.jsonl"))
+    schemas = [json.loads(line)["schema"] for line in log.read_text().splitlines()]
+    assert schemas == ["GoalSpec", "_Scope", "_Blueprint"]
+
+
+def test_plan_reports_a_plan_that_cannot_be_made(tmp_path, use_llm):
+    cyclic = _scope({**_SHAPE, "a0": ("research", ["a3"])})
+    use_llm(_fake(scope=cyclic))
+
+    result = runner.invoke(
+        app,
+        ["plan", "--goal-file", str(_goal_file(tmp_path)), "--dry-run", "--trace-dir", str(tmp_path)],
+    )
+
+    assert result.exit_code == 1
+    assert "planning failed" in result.stdout
+
+
+def test_run_completes_the_planned_tree(tmp_path, use_llm):
+    trace_dir = tmp_path / "traces"
+    use_llm(_fake())
+
+    result = runner.invoke(
+        app,
+        ["run", "--goal-file", str(_goal_file(tmp_path)), "--trace-dir", str(trace_dir), "--verbose"],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    records = _trace_records(trace_dir)
+    assert sorted(r["node_id"] for r in records) == sorted(_SHAPE)
+    assert all(r["verifier_verdict"] == "PASS" for r in records)
+
+
+def test_a_node_that_keeps_failing_gives_up_and_the_rest_of_the_tree_still_runs(tmp_path, use_llm):
+    """A root whose assertion is always false. Seen live: such a node used to burn the
+    run-wide backtrack budget and stop everything. Now it gets its own retries, gives
+    up, and the independent branch (b0 -> b1) still runs; its dependents are skipped.
+    """
+    trace_dir = tmp_path / "traces"
+    use_llm(_fake(blueprint=_blueprint(assertions={"a0": ["False"]})))
+
+    result = runner.invoke(
+        app, ["run", "--goal-file", str(_goal_file(tmp_path)), "--trace-dir", str(trace_dir)]
+    )
+
+    assert result.exit_code == 1
+    assert "incomplete: gave up on a0" in " ".join(result.stdout.split())
+    records = _trace_records(trace_dir)
+    assert [r["verifier_verdict"] for r in records if r["node_id"] == "a0"] == ["FAIL"] * 3
+    passed = {r["node_id"] for r in records if r["verifier_verdict"] == "PASS"}
+    assert {"b0", "b1"} <= passed
+    assert records[-1]["node_id"] == "__incomplete__"
+
+
+def test_run_aborts_cleanly_when_planning_fails(tmp_path, use_llm):
+    trace_dir = tmp_path / "traces"
+    use_llm(_fake(scope=_scope({**_SHAPE, "a0": ("research", ["a3"])})))
+
+    result = runner.invoke(
+        app, ["run", "--goal-file", str(_goal_file(tmp_path)), "--trace-dir", str(trace_dir)]
+    )
+
+    assert result.exit_code == 1
+    assert "planning failed" in result.stdout
+    assert [r["node_id"] for r in _trace_records(trace_dir)] == ["__plan__"]
 
 
 def test_replay_command_renders_the_trace_offline(tmp_path):
-    from uuid import uuid4
-
-    from kurogami.contracts import TraceRecord
-
     record = TraceRecord(
         run_id=uuid4(),
         seq=1,

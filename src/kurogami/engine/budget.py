@@ -14,12 +14,22 @@ def signature(node_goal: str, parent_ids: list[str]) -> str:
 class Budget:
     """Tracks BudgetState against BudgetLimits. Never raises; callers check ok()."""
 
-    def __init__(self, limits: BudgetLimits | None = None) -> None:
+    def __init__(self, limits: BudgetLimits | None = None, *, max_gap_fills: int = 2) -> None:
         self.limits = limits or BudgetLimits()
         self.state = BudgetState()
+        # Lives here, not in the frozen BudgetLimits contract. Exhausting it is not a
+        # breach: runtime growth just switches off and the planned tree finishes.
+        self.max_gap_fills = max_gap_fills
+        self.gap_fills_used = 0
 
     def ok(self) -> bool:
         return not self.state.breached
+
+    def gap_fills_remaining(self) -> bool:
+        return self.gap_fills_used < self.max_gap_fills
+
+    def record_gap_fill(self) -> None:
+        self.gap_fills_used += 1
 
     def record_node_created(
         self, node_id: str, *, depth: int, node_goal: str, parent_ids: list[str]
@@ -56,14 +66,16 @@ class Budget:
                 f"max_tokens_total {self.limits.max_tokens_total}"
             )
 
-    def record_node_retry(self, node_id: str) -> None:
+    def record_node_retry(self, node_id: str) -> bool:
+        """Count a self-blamed retry; False once the node is out of retries.
+
+        Seen live: one root node failing on its own burned the whole run's backtrack
+        budget and stopped everything. Its retries are now its own allowance -- when
+        it runs out, that node gives up and the rest of the tree keeps running.
+        """
         count = self.state.node_retries.get(node_id, 0) + 1
         self.state.node_retries[node_id] = count
-        if count > self.limits.max_node_retries:
-            self._breach(
-                f"node {node_id} retried {count} times, exceeding "
-                f"max_node_retries {self.limits.max_node_retries}"
-            )
+        return count <= self.limits.max_node_retries
 
     def _breach(self, reason: str) -> None:
         self.state.breached = True

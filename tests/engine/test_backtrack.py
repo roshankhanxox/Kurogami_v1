@@ -50,7 +50,7 @@ def test_apply_invalidates_and_requeues_the_target(fixture_store):
     assert event.failing_node_id == "n_004"
     assert set(event.invalidated_node_ids) == {"n_003", "n_004", "n_009", "n_010", "n_011", "n_012"}
     assert fixture_store.status("n_002") == NodeStatus.PENDING
-    assert fixture_store.pop_requeue_reason("n_002") == reason.summary
+    assert fixture_store.pop_requeue_reason("n_002") == f"{reason.summary} Evidence: x"
 
 
 def test_apply_falls_back_to_self_when_no_ancestor_is_suspected(fixture_store):

@@ -1,15 +1,28 @@
 """Level 3: run a node's self-written prompt. Generic -- no domain logic here."""
 
+import ast
 import hashlib
 import json
 import re
 import time
 from typing import Any
 
+from kurogami.agents._prompt_loader import load_prompt
 from kurogami.contracts import LLMPort, NodeKind, NodeResult, NodeSpec, SearchPort
 
-_STRUCTURED_KEY_PATTERN = re.compile(r"structured\[['\"](\w+)['\"]\]")
 _FENCED_JSON_PATTERN = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
+
+
+def _is_structured(node: ast.AST) -> bool:
+    return isinstance(node, ast.Name) and node.id == "structured"
+
+
+def _constant(node: ast.AST) -> object:
+    return node.value if isinstance(node, ast.Constant) else None
+
+
+def _render(prompt_name: str, **fields: str) -> str:
+    return load_prompt(prompt_name).format(**fields).rstrip("\n")
 
 
 class Executor:
@@ -23,7 +36,7 @@ class Executor:
     because nothing ever told the model to produce that key). Rather than
     trust the planner's generated_prompt to independently describe a JSON
     shape that happens to match its own assertions, this extracts the keys
-    the assertions actually reference -- deterministically, via regex, no
+    the assertions actually reference -- deterministically, from their AST, no
     LLM guessing -- and appends an explicit instruction to return exactly
     those keys as a fenced JSON block.
     """
@@ -54,39 +67,82 @@ class Executor:
         parts = [node.generated_prompt]
 
         if node.context:
-            parts.append("\nAncestor context:\n" + json.dumps(node.context, indent=2))
+            parts.append(_render("execute_context", context_json=json.dumps(node.context, indent=2)))
 
         if node.injected_constraints:
             constraints = "\n".join(f"- {c}" for c in node.injected_constraints)
-            parts.append(
-                "\nAdditional constraints injected by a human reviewer, which this "
-                f"output MUST honour:\n{constraints}"
-            )
+            parts.append(_render("execute_constraints", constraints=constraints))
 
         if node.kind == NodeKind.RESEARCH and self._search is not None:
             hits = self._search.search(node.node_goal)
             results = "\n".join(f"- {hit.title}: {hit.snippet} ({hit.url})" for hit in hits)
-            parts.append(f"\nSearch results:\n{results}")
+            parts.append(_render("execute_search", results=results))
 
-        required_keys = self._required_structured_keys(node.pass_condition.assertions)
+        assertions = node.pass_condition.assertions
+        required_keys = self._required_structured_keys(assertions)
+        key_rules = ""
+        checks = "\n".join(f"- {a}" for a in assertions)
         if required_keys:
-            keys_list = ", ".join(required_keys)
-            parts.append(
-                "\nEnd your response with a fenced JSON code block containing exactly "
-                f"these keys: {keys_list}. Example:\n```json\n"
-                + json.dumps(dict.fromkeys(required_keys, "..."), indent=2)
-                + "\n```"
+            key_rules = _render(
+                "execute_keys",
+                keys=", ".join(required_keys),
+                checks=checks,
+                example=json.dumps(dict.fromkeys(required_keys, "..."), indent=2),
             )
+        elif assertions:
+            key_rules = _render("execute_checks", checks=checks)
+        # Always asked for, so any node can report an unplanned prerequisite
+        # (the only trigger for runtime gap-filling -- see agents/planner.py).
+        parts.append(_render("execute_structured", key_rules=key_rules))
 
         return "\n".join(parts)
 
     @staticmethod
     def _required_structured_keys(assertions: list[str]) -> list[str]:
+        """Top-level keys the assertions read from `structured`, in order.
+
+        Read from the parsed expression, not a regex: seen live, once `.get` was
+        allowed, `structured.get('competitors')` slipped past a subscript-only regex,
+        the model was never told the key, named it `tools`, and every run failed.
+        Covers structured['k'], structured.get('k'), 'k' in structured, and a
+        literal list of keys tested with `k in structured`.
+        """
         keys: list[str] = []
+
+        def add(value: object) -> None:
+            if isinstance(value, str) and value not in keys:
+                keys.append(value)
+
         for assertion in assertions:
-            for match in _STRUCTURED_KEY_PATTERN.finditer(assertion):
-                if match.group(1) not in keys:
-                    keys.append(match.group(1))
+            try:
+                tree = ast.parse(assertion, mode="eval")
+            except SyntaxError:
+                continue
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Subscript) and _is_structured(node.value):
+                    add(_constant(node.slice))
+                elif (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "get"
+                    and _is_structured(node.func.value)
+                    and node.args
+                ):
+                    add(_constant(node.args[0]))
+                elif isinstance(node, ast.Compare) and any(
+                    isinstance(op, ast.In | ast.NotIn) for op in node.ops
+                ) and any(_is_structured(c) for c in node.comparators):
+                    add(_constant(node.left))
+                    if isinstance(node.left, ast.Name):  # `k in structured for k in [...]`
+                        for gen in ast.walk(tree):
+                            if (
+                                isinstance(gen, ast.comprehension)
+                                and isinstance(gen.target, ast.Name)
+                                and gen.target.id == node.left.id
+                                and isinstance(gen.iter, ast.List | ast.Tuple)
+                            ):
+                                for element in gen.iter.elts:
+                                    add(_constant(element))
         return keys
 
     @staticmethod

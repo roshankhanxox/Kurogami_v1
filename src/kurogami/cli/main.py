@@ -6,6 +6,7 @@ anthropic fails with a clear error rather than pretending to work.
 """
 
 import json
+import os
 import uuid
 from pathlib import Path
 from typing import Annotated, Any
@@ -17,11 +18,13 @@ from rich.console import Console
 from kurogami.adapters.llm.cached import CachedLLM
 from kurogami.adapters.llm.fake import FakeLLM
 from kurogami.adapters.llm.openai import DEFAULT_MODEL, OpenAILLM
+from kurogami.adapters.llm.recording import RecordingLLM
 from kurogami.adapters.search.fake import FakeSearch
+from kurogami.adapters.search.tavily import TavilySearch
 from kurogami.adapters.trace.jsonl import JsonlTraceSink
 from kurogami.agents.executor import Executor
 from kurogami.agents.interpreter import Interpreter
-from kurogami.agents.planner import Planner
+from kurogami.agents.planner import BlueprintError, Planner
 from kurogami.agents.rules import RuleChecker
 from kurogami.agents.verifier import Verifier
 from kurogami.cli.interrupt import CliInterrupt
@@ -30,6 +33,7 @@ from kurogami.contracts import LLMPort, SearchPort, TraceRecord
 from kurogami.engine.budget import Budget
 from kurogami.engine.interrupt import ScriptedInterrupt
 from kurogami.engine.runner import Runner
+from kurogami.engine.store import TreeStore
 
 app = typer.Typer(help="Kurogami: agent orchestration for market-entry strategy decisions.")
 console = Console()
@@ -66,9 +70,11 @@ def _build_llm(
 def _build_search(name: str) -> SearchPort | None:
     if name == "none":
         return None
-    if name != "fake":
-        raise typer.BadParameter(f"--search {name} is not available yet; only 'fake' or 'none'.")
-    return FakeSearch()
+    if name == "fake":
+        return FakeSearch()
+    if name == "tavily":
+        return TavilySearch(os.environ.get("TAVILY_API_KEY", ""))
+    raise typer.BadParameter(f"--search {name} is not available; use 'tavily', 'fake' or 'none'.")
 
 
 def _load_raw_text(goal_file: Path) -> str:
@@ -97,15 +103,29 @@ def plan(
     fake_script: Annotated[Path | None, typer.Option("--fake-script")] = None,
     no_cache: Annotated[bool, typer.Option("--no-cache")] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+    trace_dir: Annotated[Path, typer.Option("--trace-dir")] = Path("traces"),
 ) -> None:
-    """Interpret a goal file and print the planner's root NodeSpecs."""
-    llm_port = _build_llm(llm, fake_script, model=model, no_cache=no_cache)
+    """Interpret a goal file and print the Master's complete planned tree (Gate G3)."""
+    calls_log = trace_dir / f"plan-{uuid.uuid4()}.calls.jsonl"
+    llm_port = RecordingLLM(_build_llm(llm, fake_script, model=model, no_cache=no_cache), calls_log)
+    console.print(f"every LLM call is recorded in {calls_log}")
     goal_spec = Interpreter(llm_port).run(_load_raw_text(goal_file))
-    roots = Planner(llm_port).plan(goal_spec)
-    for node in roots:
+    try:
+        blueprint = Planner(llm_port).plan(goal_spec)
+    except BlueprintError as exc:
+        console.print(f"[bold red]planning failed: {exc}[/bold red]")
+        raise typer.Exit(code=1) from exc
+    for node in blueprint:
         console.print_json(node.model_dump_json())
+
+    store = TreeStore()
+    store.seed_blueprint(blueprint)
+    render_tree(store.snapshot(), console, title=goal_spec.raw_text)
+    deepest = max(node.depth for node in blueprint)
+    summary = f"{len(blueprint)} planned node(s), max depth {deepest}"
     if dry_run:
-        console.print(f"[bold]{len(roots)} root node(s), nothing executed (--dry-run).[/bold]")
+        summary += ", nothing executed (--dry-run)"
+    console.print(f"[bold]{summary}.[/bold]")
 
 
 @app.command(name="run")
@@ -121,13 +141,14 @@ def run_cmd(
     verbose: Annotated[bool, typer.Option("--verbose")] = False,
 ) -> None:
     """Run the full loop end to end and write a JSONL trace."""
-    llm_port = _build_llm(llm, fake_script, model=model, no_cache=no_cache)
-    search_port = _build_search(search)
-    interrupt_port = CliInterrupt(interrupt_at) if interrupt_at else ScriptedInterrupt([])
-
     trace_dir.mkdir(parents=True, exist_ok=True)
     trace_path = trace_dir / f"{uuid.uuid4()}.jsonl"
     trace_sink = JsonlTraceSink(trace_path)
+    calls_log = trace_path.with_suffix(".calls.jsonl")
+
+    llm_port = RecordingLLM(_build_llm(llm, fake_script, model=model, no_cache=no_cache), calls_log)
+    search_port = _build_search(search)
+    interrupt_port = CliInterrupt(interrupt_at) if interrupt_at else ScriptedInterrupt([])
 
     runner = Runner(
         interpreter=Interpreter(llm_port),
@@ -144,9 +165,16 @@ def run_cmd(
     if verbose:
         render_tree(report.snapshot, console, title=_load_raw_text(goal_file))
     console.print(f"trace written to {trace_path}")
+    console.print(f"every LLM call is recorded in {calls_log}")
 
+    if report.aborted_reason:
+        console.print(f"[bold red]{report.aborted_reason}[/bold red]")
+        raise typer.Exit(code=1)
     if report.budget_breached:
         console.print(f"[bold red]budget breached: {report.breach_reason}[/bold red]")
+        raise typer.Exit(code=1)
+    if report.incomplete_reason:
+        console.print(f"[bold red]incomplete: {report.incomplete_reason}[/bold red]")
         raise typer.Exit(code=1)
 
 

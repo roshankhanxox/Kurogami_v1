@@ -128,3 +128,128 @@ def test_snapshot_round_trips_through_the_store(fixture_store):
     assert set(snapshot.specs.keys()) == set(FIXTURE_ORDER)
     assert all(status == NodeStatus.PASSED for status in snapshot.statuses.values())
     assert snapshot.root_ids == ["n_001"]
+
+
+# --- scoped planning: blueprint seeding, regeneration, gap-fill wiring ------------------
+
+
+def _chain() -> TreeStore:
+    """a -> b -> c, with c's check and assertion naming b."""
+    store = TreeStore()
+    c = _spec("c", ["b"], 2).model_copy(
+        update={
+            "generated_prompt": "use the findings of b",
+            "pass_condition": PassCondition(
+                assertions=["context['b'] != ''"], semantic_check="Consistent with b?"
+            ),
+        }
+    )
+    store.seed_blueprint([_spec("a", [], 0), _spec("b", ["a"], 1), c])
+    return store
+
+
+def test_seed_blueprint_rejects_a_node_before_its_parent():
+    store = TreeStore()
+    with pytest.raises(ValueError, match="before its parents"):
+        store.seed_blueprint([_spec("b", ["a"], 1), _spec("a", [], 0)])
+
+
+def test_regeneration_clones_the_subtree_and_remaps_ancestor_references():
+    store = _chain()
+    for n in ("a", "b", "c"):
+        store.mark_passed(n, _dummy_result(n))
+    store.invalidate_subtree("a")
+    store.mark_passed("a", _dummy_result("a"))
+
+    assert store.awaiting_regeneration("a")
+    clones = {c.node_id: c for c in store.regenerate_subtree("a")}
+
+    assert set(clones) == {"b~r1", "c~r1"}
+    c = clones["c~r1"]
+    assert c.parent_ids == ["b~r1"]
+    assert c.generated_prompt == "use the findings of b~r1"
+    assert c.pass_condition.assertions == ["context['b~r1'] != ''"]
+    assert c.pass_condition.semantic_check == "Consistent with b~r1?"
+    assert store.status("b") == NodeStatus.INVALIDATED  # originals kept, flagged
+    assert store.status("b~r1") == NodeStatus.PENDING
+    assert not store.awaiting_regeneration("a")
+
+
+def test_a_higher_backtrack_before_regeneration_rebuilds_only_what_ran_on_stale_input():
+    """b is backtracked (c invalidated, b re-queued) and, before b re-runs, a is
+    backtracked too. b never ran again, so it just runs fresh after a; only c --
+    which did run on stale input -- is cloned, and it waits on b.
+    """
+    store = _chain()
+    for n in ("a", "b", "c"):
+        store.mark_passed(n, _dummy_result(n))
+    store.invalidate_subtree("b")  # c invalidated, b pending
+    store.invalidate_subtree("a")  # b is pending (never re-ran): left alone
+    assert store.status("b") == NodeStatus.PENDING
+    store.mark_passed("a", _dummy_result("a"))
+
+    clones = {c.node_id: c for c in store.regenerate_subtree("a")}
+
+    assert set(clones) == {"c~r1"}
+    assert clones["c~r1"].parent_ids == ["b"]
+    assert store.status("b") == NodeStatus.PENDING
+
+
+def test_descendants_that_never_ran_are_not_invalidated_and_wait_on_clones():
+    """Seen live: never-run nodes rendered as 'invalidated', misreading as lost work."""
+    store = _chain()
+    store.mark_passed("a", _dummy_result("a"))
+    store.mark_passed("b", _dummy_result("b"))  # c has not run yet
+
+    invalidated = store.invalidate_subtree("a")
+
+    assert invalidated == ["b"]
+    assert store.status("c") == NodeStatus.PENDING
+    store.mark_passed("a", _dummy_result("a"))
+    [clone] = store.regenerate_subtree("a")
+    assert clone.node_id == "b~r1"
+    c = store.get("c")
+    assert c.parent_ids == ["b~r1"]  # rewired to the fresh copy
+    assert c.pass_condition.semantic_check == "Consistent with b~r1?"
+
+
+def test_second_regeneration_gets_the_next_version():
+    store = _chain()
+    for _ in range(2):
+        for n in [x for x in store.all_ids() if store.status(x) == NodeStatus.PENDING]:
+            store.mark_passed(n, _dummy_result(n))
+        store.invalidate_subtree("a")
+        store.mark_passed("a", _dummy_result("a"))
+        store.regenerate_subtree("a")
+    assert {"b~r1", "c~r1", "b~r2", "c~r2"} <= set(store.all_ids())
+    assert store.get("c~r2").parent_ids == ["b~r2"]
+
+
+def test_gap_node_becomes_an_extra_parent_of_pending_children():
+    store = _chain()
+    store.mark_passed("a", _dummy_result("a"))
+
+    added = store.add_gap_node(_spec("gap", ["a"], 1), "a", max_depth=5)
+
+    assert added is True
+    assert store.get("b").parent_ids == ["a", "gap"]
+    assert store.get("b").depth == 2
+    assert store.get("c").depth == 3
+
+
+def test_gap_node_that_would_exceed_the_depth_limit_changes_nothing():
+    store = _chain()
+    store.mark_passed("a", _dummy_result("a"))
+
+    added = store.add_gap_node(_spec("gap", ["a"], 1), "a", max_depth=2)
+
+    assert added is False
+    assert "gap" not in store.all_ids()
+    assert store.get("b").parent_ids == ["a"]
+    assert store.get("c").depth == 2
+
+
+def test_gap_node_with_a_colliding_id_is_rejected():
+    store = _chain()
+    with pytest.raises(DuplicateNodeError):
+        store.add_gap_node(_spec("b", ["a"], 1), "a", max_depth=5)

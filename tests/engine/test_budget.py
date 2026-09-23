@@ -41,12 +41,12 @@ def test_budget_token_breach():
     assert not budget.ok()
 
 
-def test_budget_node_retry_breach():
+def test_node_retry_cap_is_per_node_and_not_a_run_breach():
     budget = Budget(BudgetLimits(max_node_retries=1))
-    budget.record_node_retry("n_004")
-    assert budget.ok()
-    budget.record_node_retry("n_004")
-    assert not budget.ok()
+    assert budget.record_node_retry("n_004") is True
+    assert budget.record_node_retry("n_004") is False  # out of retries
+    assert budget.record_node_retry("n_005") is True  # another node's own allowance
+    assert budget.ok()  # the run itself carries on
 
 
 def test_budget_loop_detector_breach_on_identical_signature():
@@ -62,3 +62,11 @@ def test_budget_never_raises_once_already_breached():
     budget.record_node_created("n_001", depth=0, node_goal="g", parent_ids=[])
     budget.record_node_created("n_002", depth=0, node_goal="g2", parent_ids=[])  # would raise if unguarded
     assert not budget.ok()
+
+
+def test_gap_fill_cap_is_not_a_breach():
+    budget = Budget(max_gap_fills=1)
+    assert budget.gap_fills_remaining()
+    budget.record_gap_fill()
+    assert not budget.gap_fills_remaining()
+    assert budget.ok()  # growth just switches off; the planned tree still finishes
