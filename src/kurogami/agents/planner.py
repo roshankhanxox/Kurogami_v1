@@ -38,6 +38,7 @@ MIN_TREE_DEPTH = 4
 SCOPE_STAGES = 6
 MAX_CORRECTIONS = 2
 MIN_PROMPT_WORDS = 40
+MIN_PROMPT_FLOOR = 30
 MISSING_PREREQUISITES_KEY = "missing_prerequisites"
 _UNBOUNDED = re.compile(
     r"\b(all|every|each and every|comprehensive(?:ly)?|complete(?:ly)?|exhaustive(?:ly)?|"
@@ -188,8 +189,7 @@ class Planner:
                 allowed_functions=", ".join(ALLOWED_FUNCTIONS),
             )
             fixed = {n.node_id: n for n in self._ask(prompt + note, _Blueprint).nodes}
-            kept = [n for n in blueprint if n.node_id not in failing]
-            blueprint = kept + [fixed[i] for i in failing if i in fixed and i in _ids(scope)]
+            blueprint = _merge_corrections(blueprint, fixed, problems, _ids(scope))
         # Unevaluable assertions left after the corrections are dropped (and logged);
         # structural problems cannot be.
         structural = _blueprint_problems(blueprint, scope, strict=False)
@@ -346,8 +346,9 @@ def _blueprint_problems(
         ancestors = _ancestors(node.node_id, deps)
         check = node.pass_condition.semantic_check
         words = len(node.generated_prompt.split())
-        if words < MIN_PROMPT_WORDS:
-            # Gate G3 wants substantive self-written prompts; seen live, some ran to 35.
+        # Asked for 40 (G3: "over ~40"); only a genuinely thin prompt blocks the plan.
+        # Seen live: a hard 40 aborted a whole plan over prompts of 37-39 words.
+        if words < (MIN_PROMPT_WORDS if strict else MIN_PROMPT_FLOOR):
             message = (
                 f"{node.node_id}: generated_prompt has {words} words; write at least "
                 f"{MIN_PROMPT_WORDS}, specific to this goal"
@@ -377,6 +378,50 @@ def _blueprint_problems(
                         (node.node_id, f"{node.node_id}: assertion `{assertion}` -> {error}")
                     )
     return problems
+
+
+def _merge_corrections(
+    blueprint: list[_BlueprintNode],
+    fixed: dict[str, _BlueprintNode],
+    problems: list[tuple[str, str]],
+    scope_ids: set[str],
+) -> list[_BlueprintNode]:
+    """Take from a correction only the fields that had problems.
+
+    Seen live: asked to fix assertions, the model rewrote whole nodes and good
+    prompts shrank from 32-58 words to 24-41. A correction may now only change
+    what it was asked to change.
+    """
+    current = {n.node_id: n for n in blueprint}
+    merged: dict[str, _BlueprintNode] = {i: n for i, n in current.items() if i in scope_ids}
+    for node_id in {i for i, _ in problems} & scope_ids:
+        new = fixed.get(node_id)
+        old = current.get(node_id)
+        if new is None:
+            continue
+        if old is None:
+            merged[node_id] = new
+            continue
+        messages = " ".join(m for i, m in problems if i == node_id)
+        condition = old.pass_condition
+        merged[node_id] = old.model_copy(
+            update={
+                "generated_prompt": new.generated_prompt
+                if "generated_prompt" in messages
+                else old.generated_prompt,
+                "pass_condition": condition.model_copy(
+                    update={
+                        "semantic_check": new.pass_condition.semantic_check
+                        if "semantic_check" in messages
+                        else condition.semantic_check,
+                        "assertions": new.pass_condition.assertions
+                        if "assertion" in messages
+                        else condition.assertions,
+                    }
+                ),
+            }
+        )
+    return list(merged.values())
 
 
 def _names(text: str, node_id: str) -> bool:

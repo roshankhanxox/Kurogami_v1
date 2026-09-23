@@ -96,9 +96,27 @@ def _comprehension_bound_names(tree: ast.AST) -> set[str]:
     return bound
 
 
+# Read-only dict methods. Seen live: gpt-4.1-mini writes defensive assertions such as
+# `isinstance(structured.get('tools'), list)` -- ~40 of them in one plan, all rejected,
+# and the mass correction that followed degraded good prompts. Only these exact
+# attribute names are reachable; nothing dunder, nothing that mutates. On a non-dict
+# they raise AttributeError, which check() turns into a typed FAIL.
+_ALLOWED_METHODS = frozenset({"get", "keys", "values", "items"})
+
+
 def _validate(tree: ast.AST) -> None:
     locally_bound = _comprehension_bound_names(tree)
+    method_calls = {
+        id(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+    }
     for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute):
+            if node.attr not in _ALLOWED_METHODS or id(node) not in method_calls:
+                raise UnsafeAssertionError(
+                    f"assertion uses a disallowed attribute: .{node.attr} "
+                    f"(only calls to {', '.join(sorted(_ALLOWED_METHODS))})"
+                )
+            continue
         if not isinstance(node, _ALLOWED_NODE_TYPES):
             raise UnsafeAssertionError(f"assertion uses disallowed syntax: {type(node).__name__}")
         if (
@@ -107,7 +125,7 @@ def _validate(tree: ast.AST) -> None:
             and node.id not in locally_bound
         ):
             raise UnsafeAssertionError(f"assertion references disallowed name: {node.id!r}")
-        if isinstance(node, ast.Call) and (
+        if isinstance(node, ast.Call) and not isinstance(node.func, ast.Attribute) and (
             not isinstance(node.func, ast.Name) or node.func.id not in _ALLOWED_CALL_NAMES
         ):
             func = node.func.id if isinstance(node.func, ast.Name) else type(node.func).__name__
@@ -148,7 +166,9 @@ class RuleChecker:
                 # Same bucket as UnsafeAssertionError: the assertion string itself
                 # is malformed, not a runtime failure against valid data.
                 return self._fail(node, "schema", str(exc), assertion)
-            except (TypeError, KeyError, IndexError, ValueError, ZeroDivisionError) as exc:
+            except (
+                TypeError, KeyError, IndexError, ValueError, ZeroDivisionError, AttributeError
+            ) as exc:
                 return self._fail(
                     node, "assertion", f"assertion raised {type(exc).__name__}: {exc}", assertion
                 )

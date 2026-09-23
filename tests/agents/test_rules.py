@@ -1,5 +1,7 @@
 """RuleChecker: cheap deterministic assertions, evaluated in a restricted namespace."""
 
+import pytest
+
 from kurogami.agents.rules import RuleChecker
 from kurogami.contracts import NodeKind, NodeResult, NodeSpec, PassCondition
 
@@ -106,11 +108,40 @@ def test_safe_builtins_are_permitted():
     assert verdict.verdict == "PASS"
 
 
-def test_method_calls_are_still_rejected():
-    node = _node(["structured.get('x') is None"])
-    verdict = RuleChecker().check(node, _result({}))
+def test_read_only_dict_methods_are_permitted():
+    """Seen live: gpt-4.1-mini's defensive `structured.get(...)` assertions were all
+    rejected, and the mass correction that followed degraded good prompts."""
+    node = _node([
+        "isinstance(structured.get('tools'), list)",
+        "structured.get('missing') is None",
+        "'a' in structured.keys()",
+        "all(v > 0 for v in structured.get('scores', {}).values())",
+    ])
+    verdict = RuleChecker().check(node, _result({"tools": [], "a": 1, "scores": {"x": 2}}))
+    assert verdict.verdict == "PASS", verdict.reason
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "structured.__class__",
+        "structured.get.__self__",
+        "structured.pop('x')",
+        "structured.update({})",
+        "structured.get",  # attribute not called
+        "len.__call__('x')",
+    ],
+)
+def test_other_attributes_are_still_rejected(expression):
+    verdict = RuleChecker().check(_node([expression]), _result({"x": 1}))
     assert verdict.verdict == "FAIL"
     assert verdict.reason.violated == "schema"
+
+
+def test_a_dict_method_on_a_non_dict_is_a_typed_fail_not_a_crash():
+    verdict = RuleChecker().check(_node(["structured['name'].get('x')"]), _result({"name": "s"}))
+    assert verdict.verdict == "FAIL"
+    assert verdict.reason.violated == "assertion"
 
 
 def test_list_comprehension_is_permitted_syntax():

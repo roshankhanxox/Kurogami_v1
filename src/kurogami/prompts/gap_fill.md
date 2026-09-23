@@ -28,8 +28,9 @@ Rules, all mandatory:
 3. node_id: a new unique snake_case id that is not any id in the scope.
 4. generated_prompt: at least forty words, specific to this goal.
 5. pass_condition.assertions: valid Python boolean expressions over `structured`
-   and `context` only, using only these functions: {allowed_functions}. No
-   natural-language sentences and no method calls.
+   and `context` only, using only these functions: {allowed_functions}, plus
+   the dict methods .get/.keys/.values/.items. No natural-language sentences and
+   no other method calls.
 6. pass_condition.semantic_check: must name the reporting node's id,
    {reporter_id}, verbatim.
 

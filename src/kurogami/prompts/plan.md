@@ -23,8 +23,9 @@ For every item, write a node with:
   evaluated literally against the node's own structured output. Never write a
   natural-language sentence here. An expression may only use the name
   `structured` (a dict), the name `context` (a dict), and these functions:
-  {allowed_functions}. No attribute or method access (no `.get`, `.lower`,
-  `.keys`, etc.). Example, for a structured output with a "competitors" list:
+  {allowed_functions}. The only methods allowed are the read-only dict methods
+  `.get`, `.keys`, `.values` and `.items` -- no other attribute access (no `.lower`,
+  `.append`, etc.). Example, for a structured output with a "competitors" list:
   "len(structured['competitors']) >= 3". Use an empty list if no cheap check
   applies.
 - pass_condition.semantic_check: one question a verifier will ask about the

@@ -156,14 +156,14 @@ def test_plan_raises_blueprint_error_when_the_scope_is_still_invalid():
 
 
 def test_plan_reasks_then_drops_an_assertion_that_is_still_unevaluable():
-    bad = _blueprint(a1=["structured.keys()", "len(structured['items']) > 0"])
+    bad = _blueprint(a1=["structured.pop('x')", "len(structured['items']) > 0"])
     still_bad_a1 = _Blueprint(nodes=[n for n in bad.nodes if n.node_id == "a1"])
     llm = _ScriptedLLM([_scope(), bad, still_bad_a1, still_bad_a1])
 
     nodes = {n.node_id: n for n in Planner(llm).plan(_goal())}
 
     assert len(llm.prompts) == 4  # scope + blueprint + two corrections
-    assert "structured.keys()" in llm.prompts[3]
+    assert "structured.pop('x')" in llm.prompts[3]
     assert nodes["a1"].pass_condition.assertions == ["len(structured['items']) > 0"]
 
 
