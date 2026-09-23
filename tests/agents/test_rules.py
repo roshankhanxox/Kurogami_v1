@@ -67,6 +67,41 @@ def test_context_lookup_itself_is_permitted_syntax():
     assert verdict.verdict == "PASS"
 
 
+def test_generator_expression_inside_any_is_permitted_syntax():
+    """Regression: seen live -- `all(x > 0 for x in structured['tiers'])`
+    was rejected (GeneratorExp/comprehension weren't in the whitelist).
+    """
+    node = _node(["all(x > 0 for x in structured['tiers'])"])
+    result = _result({"tiers": [100, 200, 300]})
+    verdict = RuleChecker().check(node, result)
+    assert verdict.verdict == "PASS"
+
+
+def test_generator_expression_can_still_fail_on_real_data():
+    node = _node(["all(x > 0 for x in structured['tiers'])"])
+    result = _result({"tiers": [100, -1, 300]})
+    verdict = RuleChecker().check(node, result)
+    assert verdict.verdict == "FAIL"
+
+
+def test_list_comprehension_is_permitted_syntax():
+    node = _node(["len([x for x in structured['tiers'] if x > 100]) >= 1"])
+    result = _result({"tiers": [50, 150, 300]})
+    verdict = RuleChecker().check(node, result)
+    assert verdict.verdict == "PASS"
+
+
+def test_comprehension_loop_variable_does_not_leak_as_an_allowed_free_name():
+    """The loop variable `x` is only safe *inside* the comprehension that binds
+    it -- it must not be usable as a free-standing name elsewhere.
+    """
+    node = _node(["x"])
+    result = _result({})
+    verdict = RuleChecker().check(node, result)
+    assert verdict.verdict == "FAIL"
+    assert verdict.reason.violated == "schema"
+
+
 def test_no_assertions_always_passes():
     node = _node([])
     result = _result({})

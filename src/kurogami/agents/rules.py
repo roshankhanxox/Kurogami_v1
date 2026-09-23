@@ -44,6 +44,12 @@ _ALLOWED_NODE_TYPES = (
     ast.List,
     ast.Tuple,
     ast.Dict,
+    ast.Store,
+    ast.GeneratorExp,
+    ast.ListComp,
+    ast.SetComp,
+    ast.DictComp,
+    ast.comprehension,
 )
 
 
@@ -51,11 +57,32 @@ class UnsafeAssertionError(ValueError):
     """Raised when an assertion string uses syntax outside the whitelist."""
 
 
+def _comprehension_bound_names(tree: ast.AST) -> set[str]:
+    """Loop variables bound by a comprehension (e.g. the `x` in `... for x in ...`).
+
+    These are arbitrary, model-chosen identifiers, locally scoped to the
+    comprehension -- safe regardless of name, unlike a free-standing Name
+    reference, which must be in _ALLOWED_NAMES.
+    """
+    bound: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.comprehension):
+            for target in ast.walk(node.target):
+                if isinstance(target, ast.Name):
+                    bound.add(target.id)
+    return bound
+
+
 def _validate(tree: ast.AST) -> None:
+    locally_bound = _comprehension_bound_names(tree)
     for node in ast.walk(tree):
         if not isinstance(node, _ALLOWED_NODE_TYPES):
             raise UnsafeAssertionError(f"assertion uses disallowed syntax: {type(node).__name__}")
-        if isinstance(node, ast.Name) and node.id not in _ALLOWED_NAMES:
+        if (
+            isinstance(node, ast.Name)
+            and node.id not in _ALLOWED_NAMES
+            and node.id not in locally_bound
+        ):
             raise UnsafeAssertionError(f"assertion references disallowed name: {node.id!r}")
         if isinstance(node, ast.Call) and (
             not isinstance(node.func, ast.Name) or node.func.id not in _ALLOWED_CALL_NAMES
