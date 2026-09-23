@@ -1,9 +1,8 @@
 """Composition root. Concrete adapters are constructed only here (CLAUDE.md R1).
 
-Only the fake LLM/search adapters exist so far (Track D -- real Anthropic/
-OpenAI adapters -- hasn't merged yet), so --llm/--search only support
-"fake" today. --llm anthropic fails with a clear error rather than
-pretending to work.
+Only the fake and OpenAI LLM adapters exist so far (the Anthropic adapter
+isn't built), so --llm only supports "fake" and "openai" today. --llm
+anthropic fails with a clear error rather than pretending to work.
 """
 
 import json
@@ -12,9 +11,12 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import typer
+from dotenv import load_dotenv
 from rich.console import Console
 
+from kurogami.adapters.llm.cached import CachedLLM
 from kurogami.adapters.llm.fake import FakeLLM
+from kurogami.adapters.llm.openai import DEFAULT_MODEL, OpenAILLM
 from kurogami.adapters.search.fake import FakeSearch
 from kurogami.adapters.trace.jsonl import JsonlTraceSink
 from kurogami.agents.executor import Executor
@@ -32,17 +34,33 @@ from kurogami.engine.runner import Runner
 app = typer.Typer(help="Kurogami: agent orchestration for market-entry strategy decisions.")
 console = Console()
 
+load_dotenv()
 
-def _build_llm(name: str, fake_script: Path | None) -> LLMPort:
-    if name != "fake":
-        raise typer.BadParameter(
-            f"--llm {name} is not available yet; only 'fake' is implemented "
-            "(the real adapters are Track D / feat/bench-harness)."
-        )
-    responses: dict[str, Any] = {}
-    if fake_script is not None:
-        responses = json.loads(fake_script.read_text())
-    return FakeLLM(responses=responses)
+
+def _build_llm(
+    name: str,
+    fake_script: Path | None,
+    *,
+    model: str = DEFAULT_MODEL,
+    no_cache: bool = False,
+    cache_dir: Path = Path(".cache/llm"),
+) -> LLMPort:
+    if name == "fake":
+        responses: dict[str, Any] = {}
+        if fake_script is not None:
+            responses = json.loads(fake_script.read_text())
+        return FakeLLM(responses=responses)
+
+    if name == "openai":
+        llm: LLMPort = OpenAILLM(model=model)
+        if no_cache:
+            return llm
+        return CachedLLM(llm, model_id=model, cache_dir=cache_dir)
+
+    raise typer.BadParameter(
+        f"--llm {name} is not available yet; only 'fake' and 'openai' are implemented "
+        "(the Anthropic adapter isn't built)."
+    )
 
 
 def _build_search(name: str) -> SearchPort | None:
@@ -62,10 +80,12 @@ def _load_raw_text(goal_file: Path) -> str:
 def interpret(
     text: Annotated[str, typer.Option("--text", help="A single sentence describing the decision.")],
     llm: Annotated[str, typer.Option("--llm")] = "fake",
+    model: Annotated[str, typer.Option("--model")] = DEFAULT_MODEL,
     fake_script: Annotated[Path | None, typer.Option("--fake-script")] = None,
+    no_cache: Annotated[bool, typer.Option("--no-cache")] = False,
 ) -> None:
     """Interpret a sentence into a GoalSpec and print it."""
-    goal = Interpreter(_build_llm(llm, fake_script)).run(text)
+    goal = Interpreter(_build_llm(llm, fake_script, model=model, no_cache=no_cache)).run(text)
     console.print_json(goal.model_dump_json())
 
 
@@ -73,11 +93,13 @@ def interpret(
 def plan(
     goal_file: Annotated[Path, typer.Option("--goal-file", exists=True)],
     llm: Annotated[str, typer.Option("--llm")] = "fake",
+    model: Annotated[str, typer.Option("--model")] = DEFAULT_MODEL,
     fake_script: Annotated[Path | None, typer.Option("--fake-script")] = None,
+    no_cache: Annotated[bool, typer.Option("--no-cache")] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
 ) -> None:
     """Interpret a goal file and print the planner's root NodeSpecs."""
-    llm_port = _build_llm(llm, fake_script)
+    llm_port = _build_llm(llm, fake_script, model=model, no_cache=no_cache)
     goal_spec = Interpreter(llm_port).run(_load_raw_text(goal_file))
     roots = Planner(llm_port).plan(goal_spec)
     for node in roots:
@@ -90,14 +112,16 @@ def plan(
 def run_cmd(
     goal_file: Annotated[Path, typer.Option("--goal-file", exists=True)],
     llm: Annotated[str, typer.Option("--llm")] = "fake",
+    model: Annotated[str, typer.Option("--model")] = DEFAULT_MODEL,
     fake_script: Annotated[Path | None, typer.Option("--fake-script")] = None,
+    no_cache: Annotated[bool, typer.Option("--no-cache")] = False,
     search: Annotated[str, typer.Option("--search")] = "fake",
     interrupt_at: Annotated[list[str], typer.Option("--interrupt-at")] = [],  # noqa: B006
     trace_dir: Annotated[Path, typer.Option("--trace-dir")] = Path("traces"),
     verbose: Annotated[bool, typer.Option("--verbose")] = False,
 ) -> None:
     """Run the full loop end to end and write a JSONL trace."""
-    llm_port = _build_llm(llm, fake_script)
+    llm_port = _build_llm(llm, fake_script, model=model, no_cache=no_cache)
     search_port = _build_search(search)
     interrupt_port = CliInterrupt(interrupt_at) if interrupt_at else ScriptedInterrupt([])
 
