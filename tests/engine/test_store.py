@@ -2,9 +2,16 @@
 
 import pytest
 
-from kurogami.contracts import NodeKind, NodeSpec, NodeStatus, PassCondition
+from kurogami.contracts import NodeKind, NodeResult, NodeSpec, NodeStatus, PassCondition
 from kurogami.engine.demo_tree import FIXTURE_ORDER
-from kurogami.engine.store import TreeStore, UnknownNodeError
+from kurogami.engine.store import DuplicateNodeError, TreeStore, UnknownNodeError
+
+
+def _dummy_result(node_id: str) -> NodeResult:
+    return NodeResult(
+        node_id=node_id, output="x", tokens_in=1, tokens_out=1, latency_ms=1,
+        model_id="fake", prompt_version="v1",
+    )
 
 _DIFFERENTIATION_DESCENDANTS = {"n_003", "n_004", "n_009", "n_010", "n_011", "n_012"}
 _UNTOUCHED_BY_DIFFERENTIATION_INVALIDATION = {"n_001", "n_005", "n_006", "n_007", "n_008"}
@@ -77,6 +84,43 @@ def test_unknown_node_id_raises():
     store = TreeStore()
     with pytest.raises(UnknownNodeError):
         store.get("does_not_exist")
+
+
+def _spec(node_id: str, parent_ids: list[str], depth: int) -> NodeSpec:
+    return NodeSpec(
+        node_id=node_id,
+        parent_ids=parent_ids,
+        depth=depth,
+        kind=NodeKind.ANALYSIS,
+        title=node_id,
+        node_goal=f"goal for {node_id}",
+        generated_prompt=f"prompt for {node_id}",
+        pass_condition=PassCondition(assertions=[], semantic_check="ok?"),
+    )
+
+
+def test_seed_rejects_a_duplicate_node_id():
+    store = TreeStore()
+    store.seed([_spec("n_a", [], 0), _spec("n_b", [], 0)])
+    with pytest.raises(DuplicateNodeError):
+        store.seed([_spec("n_a", [], 0)])
+
+
+def test_attach_rejects_a_child_id_colliding_with_an_existing_root():
+    """Regression: seen live -- a planner call produced a root node and,
+    later, an unrelated expand()-produced child with the same node_id. This
+    must be rejected, not silently overwrite the root's spec and status.
+    """
+    store = TreeStore()
+    store.seed([_spec("n_a", [], 0), _spec("marketing_strategy", [], 0)])
+    store.mark_passed("n_a", _dummy_result("n_a"))
+
+    with pytest.raises(DuplicateNodeError):
+        store.attach(store.get("n_a"), [_spec("marketing_strategy", ["n_a"], 1)])
+
+    # the original root must be untouched
+    assert store.get("marketing_strategy").parent_ids == []
+    assert store.status("marketing_strategy") == NodeStatus.PENDING
 
 
 def test_snapshot_round_trips_through_the_store(fixture_store):

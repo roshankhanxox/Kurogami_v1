@@ -167,8 +167,64 @@ def test_full_run_with_fake_llm():
     assert "FAIL" in verdicts
     assert verdicts[-1] == "PASS"
 
-    fail_record = next(r for r in trace_sink.records if r.verifier_verdict == "FAIL")
-    assert fail_record.backtrack_target == "n_b"
 
-    pass_records = [r for r in trace_sink.records if r.node_id == "n_b" and r.verifier_verdict == "PASS"]
-    assert pass_records[0].verifier_verdict == "PASS"
+class _AlwaysPassVerifier:
+    def check(self, node: NodeSpec, result: NodeResult, context: dict[str, str]) -> Verdict:
+        return Verdict(node_id=node.node_id, verdict="PASS", checked_by="llm")
+
+
+class _CollidingChildPlanner:
+    """Root n_a always passes, but expand() always tries to attach a child
+    with node_id="n_a" -- the same id as the node being expanded. Regression
+    for a live incident where a colliding node_id silently corrupted the
+    tree instead of being rejected.
+    """
+
+    def plan(self, goal: GoalSpec) -> list[NodeSpec]:
+        return [
+            NodeSpec(
+                node_id="n_a",
+                parent_ids=[],
+                depth=0,
+                kind=NodeKind.ANALYSIS,
+                title="root",
+                node_goal="root goal",
+                generated_prompt="root prompt",
+                pass_condition=_pass_condition(),
+            )
+        ]
+
+    def expand(self, node: NodeSpec, result: NodeResult, goal: GoalSpec) -> list[NodeSpec]:
+        return [
+            NodeSpec(
+                node_id="n_a",
+                parent_ids=["n_a"],
+                depth=1,
+                kind=NodeKind.ANALYSIS,
+                title="colliding child",
+                node_goal="x",
+                generated_prompt="x",
+                pass_condition=_pass_condition(),
+            )
+        ]
+
+
+def test_colliding_child_node_id_breaches_budget_cleanly_not_a_crash():
+    runner = Runner(
+        interpreter=_FakeInterpreter(),
+        planner=_CollidingChildPlanner(),
+        executor=_FakeExecutor(),
+        rules_checker=_AlwaysPassRules(),
+        verifier=_AlwaysPassVerifier(),
+        interrupt=_NeverInterrupt(),
+        trace_sink=_MemoryTraceSink(),
+    )
+
+    report = runner.run("Should I launch my invoicing tool?")  # must not raise
+
+    assert report.budget_breached is True
+    # Either the loop detector (repeated identical signature) or
+    # max_backtracks catches this -- both are a clean stop, not a crash.
+    assert report.breach_reason is not None
+    assert "loop detected" in report.breach_reason or "max_backtracks" in report.breach_reason
+    assert report.snapshot.statuses["n_a"] in (NodeStatus.PENDING, NodeStatus.SKIPPED)

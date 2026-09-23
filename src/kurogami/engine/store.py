@@ -7,6 +7,17 @@ class UnknownNodeError(KeyError):
     """Raised when a TreeStore operation references a node_id the store has never seen."""
 
 
+class DuplicateNodeError(ValueError):
+    """Raised when seed()/attach() is given a node_id the store already has.
+
+    Seen live: a real planner call generated a root node and, later, an
+    unrelated expand()-produced child with the same node_id. Without this
+    check, _add() silently overwrote the root's spec and status with the
+    child's -- corrupting the tree (the root vanished from its own subtree,
+    while root_ids still listed it, producing an inconsistent render).
+    """
+
+
 class TreeStore:
     """Owns the node graph. Nodes are never deleted, only re-flagged.
 
@@ -40,8 +51,12 @@ class TreeStore:
             self._add(child)
 
     def _add(self, node: NodeSpec) -> None:
+        if node.node_id in self._specs:
+            raise DuplicateNodeError(
+                f"node_id {node.node_id!r} already exists in the store; ids must be unique"
+            )
         self._specs[node.node_id] = node
-        self._statuses.setdefault(node.node_id, NodeStatus.PENDING)
+        self._statuses[node.node_id] = NodeStatus.PENDING
 
     def update_spec(self, node: NodeSpec) -> None:
         """Replace the stored spec for an already-known node, e.g. after context assembly."""
