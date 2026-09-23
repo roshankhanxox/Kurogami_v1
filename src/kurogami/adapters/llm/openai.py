@@ -31,10 +31,17 @@ class OpenAILLM:
         model: str = DEFAULT_MODEL,
         api_key: str | None = None,
         max_retries: int = 2,
+        timeout_s: float = 60.0,
         client: Any = None,
     ) -> None:
         self._model = model
-        self._client = client if client is not None else OpenAI(api_key=api_key, max_retries=max_retries)
+        # The SDK's default timeout is 10 minutes; one stalled connection froze a
+        # whole live run. 60s, retried by the SDK, fails fast instead.
+        self._client = (
+            client
+            if client is not None
+            else OpenAI(api_key=api_key, max_retries=max_retries, timeout=timeout_s)
+        )
 
     def complete(
         self,
