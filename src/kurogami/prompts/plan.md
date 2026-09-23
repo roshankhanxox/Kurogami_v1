@@ -31,6 +31,8 @@ For every item, write a node with:
   output. For any item that depends on other items, it must name at least one
   of its ancestor ids verbatim -- for example "Do the proposed tiers stay under
   the price ceiling found in the_ancestor_id?". Never write a vacuous check such
-  as "is the output non-empty".
+  as "is the output non-empty". Never ask for unbounded completeness ("all",
+  "every", "comprehensive") -- no output can prove it. Set a bar it can visibly
+  meet instead, e.g. "Does it name at least 4 competitors with their pricing?".
 
 Return the nodes, and nothing else.

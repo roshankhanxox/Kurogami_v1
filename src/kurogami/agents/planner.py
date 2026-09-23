@@ -9,6 +9,7 @@ it at runtime when a node reports a prerequisite nobody planned for.
 
 import json
 import logging
+import re
 from typing import TypeVar
 
 from pydantic import BaseModel
@@ -38,6 +39,11 @@ SCOPE_STAGES = 6
 MAX_CORRECTIONS = 2
 MIN_PROMPT_WORDS = 40
 MISSING_PREREQUISITES_KEY = "missing_prerequisites"
+_UNBOUNDED = re.compile(
+    r"\b(all|every|each and every|comprehensive(?:ly)?|complete(?:ly)?|exhaustive(?:ly)?|"
+    r"entire(?:ly)?|fully)\b",
+    re.IGNORECASE,
+)
 
 _Model = TypeVar("_Model", bound=BaseModel)
 
@@ -186,7 +192,7 @@ class Planner:
             blueprint = kept + [fixed[i] for i in failing if i in fixed and i in _ids(scope)]
         # Unevaluable assertions left after the corrections are dropped (and logged);
         # structural problems cannot be.
-        structural = _blueprint_problems(blueprint, scope, check_assertions=False)
+        structural = _blueprint_problems(blueprint, scope, strict=False)
         if structural:
             raise BlueprintError(
                 f"blueprint still invalid after {MAX_CORRECTIONS} corrections: "
@@ -337,7 +343,7 @@ def _longest_chain(order: list[str], deps: dict[str, list[str]]) -> list[str]:
 
 
 def _blueprint_problems(
-    blueprint: list[_BlueprintNode], scope: list[_ScopeItem], *, check_assertions: bool = True
+    blueprint: list[_BlueprintNode], scope: list[_ScopeItem], *, strict: bool = True
 ) -> list[tuple[str, str]]:
     """(node_id, message) pairs, so a correction can target just the failing nodes."""
     problems: list[tuple[str, str]] = []
@@ -364,13 +370,23 @@ def _blueprint_problems(
                 f"{MIN_PROMPT_WORDS}, specific to this goal"
             )
             problems.append((node.node_id, message))
+        unbounded = _UNBOUNDED.search(check)
+        if strict and unbounded:
+            # Seen live: "Does the analysis cover all major competitors?" -- the
+            # verifier kept moving the goalposts and no retry could ever pass it.
+            message = (
+                f"{node.node_id}: semantic_check asks for unbounded completeness "
+                f"('{unbounded.group(0)}'); state a bar the output can verifiably meet, "
+                f"e.g. 'names at least 4 competitors with their pricing'"
+            )
+            problems.append((node.node_id, message))
         if ancestors and not any(_names(check, a) for a in ancestors):
             message = (
                 f"{node.node_id}: semantic_check must name one of its ancestor ids, "
                 f"e.g. {min(ancestors)} (any of {sorted(ancestors)})"
             )
             problems.append((node.node_id, message))
-        if check_assertions:
+        if strict:
             for assertion in node.pass_condition.assertions:
                 error = _assertion_error(assertion)
                 if error is not None:

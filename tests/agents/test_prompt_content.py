@@ -59,3 +59,8 @@ def test_interpret_prompt_requires_flagging_ambiguity_not_resolving_it():
     content = load_prompt("interpret")
     assert "ambiguities" in content
     assert "Do NOT resolve ambiguity" in content
+
+
+def test_plan_prompt_forbids_unbounded_completeness_checks():
+    """Live incident: 'cover all major competitors' was unpassable."""
+    assert "Never ask for unbounded completeness" in _normalized("plan")

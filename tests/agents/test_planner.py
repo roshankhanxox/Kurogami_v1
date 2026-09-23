@@ -267,6 +267,33 @@ def test_corrections_keep_accepted_nodes_and_reask_only_the_failing_ones():
     assert nodes["final"].generated_prompt == first.nodes[-1].generated_prompt  # untouched
 
 
+@pytest.mark.parametrize(
+    "check",
+    [
+        "Does the analysis cover all major competitors, per a0?",
+        "Is it a comprehensive view of a0?",
+        "Is every risk from a0 addressed?",
+    ],
+)
+def test_an_unbounded_semantic_check_is_a_problem(check):
+    """Live incident: 'cover all major competitors' could never pass -- the verifier
+    kept naming more after each retry."""
+    nodes = _blueprint().nodes
+    nodes[1] = nodes[1].model_copy(
+        update={"pass_condition": PassCondition(assertions=[], semantic_check=check)}
+    )
+    problems = _blueprint_problems(nodes, _scope().items)
+    assert any(n == "a1" and "unbounded completeness" in m for n, m in problems), problems
+
+
+def test_an_unbounded_check_is_not_structural_so_it_never_sinks_the_plan():
+    nodes = _blueprint().nodes
+    nodes[1] = nodes[1].model_copy(
+        update={"pass_condition": PassCondition(assertions=[], semantic_check="All of a0?")}
+    )
+    assert _blueprint_problems(nodes, _scope().items, strict=False) == []
+
+
 def test_a_short_generated_prompt_is_a_problem():
     nodes = _blueprint().nodes
     nodes[0] = nodes[0].model_copy(update={"generated_prompt": "Research the market."})
