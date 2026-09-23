@@ -21,7 +21,7 @@ from kurogami.adapters.search.fake import FakeSearch
 from kurogami.adapters.trace.jsonl import JsonlTraceSink
 from kurogami.agents.executor import Executor
 from kurogami.agents.interpreter import Interpreter
-from kurogami.agents.planner import Planner
+from kurogami.agents.planner import BlueprintError, Planner
 from kurogami.agents.rules import RuleChecker
 from kurogami.agents.verifier import Verifier
 from kurogami.cli.interrupt import CliInterrupt
@@ -30,6 +30,7 @@ from kurogami.contracts import LLMPort, SearchPort, TraceRecord
 from kurogami.engine.budget import Budget
 from kurogami.engine.interrupt import ScriptedInterrupt
 from kurogami.engine.runner import Runner
+from kurogami.engine.store import TreeStore
 
 app = typer.Typer(help="Kurogami: agent orchestration for market-entry strategy decisions.")
 console = Console()
@@ -98,14 +99,25 @@ def plan(
     no_cache: Annotated[bool, typer.Option("--no-cache")] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
 ) -> None:
-    """Interpret a goal file and print the planner's root NodeSpecs."""
+    """Interpret a goal file and print the Master's complete planned tree (Gate G3)."""
     llm_port = _build_llm(llm, fake_script, model=model, no_cache=no_cache)
     goal_spec = Interpreter(llm_port).run(_load_raw_text(goal_file))
-    roots = Planner(llm_port).plan(goal_spec)
-    for node in roots:
+    try:
+        blueprint = Planner(llm_port).plan(goal_spec)
+    except BlueprintError as exc:
+        console.print(f"[bold red]planning failed: {exc}[/bold red]")
+        raise typer.Exit(code=1) from exc
+    for node in blueprint:
         console.print_json(node.model_dump_json())
+
+    store = TreeStore()
+    store.seed_blueprint(blueprint)
+    render_tree(store.snapshot(), console, title=goal_spec.raw_text)
+    deepest = max(node.depth for node in blueprint)
+    summary = f"{len(blueprint)} planned node(s), max depth {deepest}"
     if dry_run:
-        console.print(f"[bold]{len(roots)} root node(s), nothing executed (--dry-run).[/bold]")
+        summary += ", nothing executed (--dry-run)"
+    console.print(f"[bold]{summary}.[/bold]")
 
 
 @app.command(name="run")
@@ -145,6 +157,9 @@ def run_cmd(
         render_tree(report.snapshot, console, title=_load_raw_text(goal_file))
     console.print(f"trace written to {trace_path}")
 
+    if report.aborted_reason:
+        console.print(f"[bold red]{report.aborted_reason}[/bold red]")
+        raise typer.Exit(code=1)
     if report.budget_breached:
         console.print(f"[bold red]budget breached: {report.breach_reason}[/bold red]")
         raise typer.Exit(code=1)

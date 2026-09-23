@@ -23,4 +23,4 @@ def test_prompt_version_is_filename_plus_stable_hash():
 
 
 def test_prompt_version_differs_for_different_prompts():
-    assert prompt_version("plan") != prompt_version("expand")
+    assert prompt_version("plan") != prompt_version("scope")

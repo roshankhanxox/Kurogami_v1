@@ -1,8 +1,22 @@
-"""Planner: plan() writes roots, expand() writes children -- offline via FakeLLM."""
+"""Planner: scope the whole investigation, write the full tree, gap-fill only when asked.
 
-from kurogami.adapters.llm.fake import FakeLLM
-from kurogami.agents._prompt_loader import load_prompt
-from kurogami.agents.planner import Planner, _NodeSpecBatch, _PlannerNodeSpec
+Offline via a scripted LLM that returns parsed models in order and records every
+prompt it was sent.
+"""
+
+import pytest
+
+from kurogami.agents.planner import (
+    BlueprintError,
+    Planner,
+    _Blueprint,
+    _blueprint_problems,
+    _BlueprintNode,
+    _GapFill,
+    _Scope,
+    _scope_problems,
+    _ScopeItem,
+)
 from kurogami.contracts import (
     GoalSpec,
     LLMResponse,
@@ -12,176 +26,236 @@ from kurogami.contracts import (
     PassCondition,
 )
 
+MAX_DEPTH = 6
+
+# A valid 10-item scope: one decision sink, longest chain a0-a1-c0-c1-c2-final (depth 5).
+_SCOPE_SHAPE = {
+    "a0": (NodeKind.RESEARCH, []),
+    "a1": (NodeKind.ANALYSIS, ["a0"]),
+    "a2": (NodeKind.ANALYSIS, ["a1"]),
+    "a3": (NodeKind.ANALYSIS, ["a2"]),
+    "b0": (NodeKind.RESEARCH, []),
+    "b1": (NodeKind.ANALYSIS, ["b0"]),
+    "c0": (NodeKind.ANALYSIS, ["a1"]),
+    "c1": (NodeKind.SYNTHESIS, ["c0", "b1"]),
+    "c2": (NodeKind.ANALYSIS, ["c1"]),
+    "final": (NodeKind.DECISION, ["a3", "c2"]),
+}
+
 
 def _goal() -> GoalSpec:
     return GoalSpec(
-        raw_text="x",
+        raw_text="Should I launch my invoicing tool?",
         product_description="x",
         target_market="x",
-        decision_type="market_entry",
+        decision_type="launch",
         success_definition="x",
     )
 
 
-def _node_kwargs(node_id: str = "n_a", parent_ids: list[str] | None = None, depth: int = 0) -> dict:
-    return {
-        "node_id": node_id,
-        "parent_ids": parent_ids or [],
-        "depth": depth,
-        "kind": NodeKind.ANALYSIS,
-        "title": "title",
-        "node_goal": "goal",
-        "generated_prompt": "a sufficiently long generated prompt " * 3,
-        "pass_condition": PassCondition(assertions=[], semantic_check="ok?"),
-    }
+def _scope(shape: dict[str, tuple[NodeKind, list[str]]] = _SCOPE_SHAPE) -> _Scope:
+    return _Scope(
+        items=[
+            _ScopeItem(id=i, question=f"question {i}?", kind=kind, depends_on=deps)
+            for i, (kind, deps) in shape.items()
+        ]
+    )
 
 
-def _node(node_id: str = "n_a", parent_ids: list[str] | None = None, depth: int = 0) -> NodeSpec:
-    """What the planner is expected to return: a full NodeSpec, context/injected_constraints defaulted."""
-    return NodeSpec(**_node_kwargs(node_id, parent_ids, depth))
-
-
-def _planner_node(node_id: str = "n_a", parent_ids: list[str] | None = None, depth: int = 0) -> _PlannerNodeSpec:
-    """What the LLM is actually asked to produce -- no context/injected_constraints."""
-    return _PlannerNodeSpec(**_node_kwargs(node_id, parent_ids, depth))
-
-
-def _result(node_id: str = "n_a") -> NodeResult:
-    return NodeResult(
+def _bp_node(node_id: str, deps: list[str], assertions: list[str] | None = None) -> _BlueprintNode:
+    check = f"Is this consistent with {deps[0]}?" if deps else "Does it answer the question?"
+    return _BlueprintNode(
         node_id=node_id,
-        output="x",
-        tokens_in=1,
-        tokens_out=1,
-        latency_ms=1,
-        model_id="fake",
-        prompt_version="v1",
+        title=node_id,
+        node_goal=f"goal {node_id}",
+        generated_prompt=f"prompt for {node_id} " * 10,
+        pass_condition=PassCondition(assertions=assertions or [], semantic_check=check),
     )
 
 
-def test_plan_returns_the_llms_node_specs():
-    goal = _goal()
-    llm_output = [_planner_node("n_001"), _planner_node("n_002")]
-    expected = [_node("n_001"), _node("n_002")]
-    prompt = load_prompt("plan").format(goal_json=goal.model_dump_json(indent=2))
-    llm = FakeLLM(responses={prompt: _NodeSpecBatch(nodes=llm_output)})
-
-    result = Planner(llm).plan(goal)
-
-    assert result == expected
-
-
-def test_expand_returns_the_llms_children():
-    goal = _goal()
-    parent = _node("n_001")
-    result = _result("n_001")
-    llm_output = [_planner_node("n_002", parent_ids=["n_001"], depth=1)]
-    expected = [_node("n_002", parent_ids=["n_001"], depth=1)]
-    prompt = load_prompt("expand").format(
-        parent_json=parent.model_dump_json(indent=2),
-        result_json=result.model_dump_json(indent=2),
-        goal_json=goal.model_dump_json(indent=2),
+def _blueprint(**overrides: list[str]) -> _Blueprint:
+    return _Blueprint(
+        nodes=[_bp_node(i, deps, overrides.get(i)) for i, (_, deps) in _SCOPE_SHAPE.items()]
     )
-    llm = FakeLLM(responses={prompt: _NodeSpecBatch(nodes=llm_output)})
-
-    assert Planner(llm).expand(parent, result, goal) == expected
-
-
-def test_planner_node_spec_excludes_engine_managed_fields():
-    """Regression guard: context/injected_constraints must never be part of what
-    we ask the LLM to produce -- they're engine-managed, and a schema built
-    from full NodeSpec (with these free-form/defaulted fields) is rejected
-    by OpenAI's Structured Outputs mode. See planner.py's _PlannerNodeSpec
-    docstring for the incident.
-    """
-    assert "context" not in _PlannerNodeSpec.model_fields
-    assert "injected_constraints" not in _PlannerNodeSpec.model_fields
-
-
-def test_to_node_spec_defaults_context_and_injected_constraints_empty():
-    node = _planner_node("n_001").to_node_spec()
-    assert node.context == {}
-    assert node.injected_constraints == []
-
-
-def test_expand_can_return_zero_children_to_terminate_a_branch():
-    goal = _goal()
-    parent = _node("n_001")
-    result = _result("n_001")
-    prompt = load_prompt("expand").format(
-        parent_json=parent.model_dump_json(indent=2),
-        result_json=result.model_dump_json(indent=2),
-        goal_json=goal.model_dump_json(indent=2),
-    )
-    llm = FakeLLM(responses={prompt: _NodeSpecBatch(nodes=[])})
-
-    assert Planner(llm).expand(parent, result, goal) == []
-
-
-def _planner_node_with(node_id: str, assertions: list[str]) -> _PlannerNodeSpec:
-    kwargs = _node_kwargs(node_id)
-    kwargs["pass_condition"] = PassCondition(assertions=assertions, semantic_check="ok?")
-    return _PlannerNodeSpec(**kwargs)
-
-
-def test_plan_reasks_once_when_an_assertion_cannot_be_evaluated():
-    """Regression: seen live -- an assertion calling a non-whitelisted function
-    failed identically on every retry of its node until the budget broke,
-    because re-executing a node can't change its own assertion. The planner
-    now catches this at authoring time and asks the model to fix it.
-    """
-    goal = _goal()
-    bad = _planner_node_with("n_001", ["open('x')"])
-    good = _planner_node_with("n_001", ["len(structured['items']) >= 1"])
-    llm = _ScriptedLLM([_NodeSpecBatch(nodes=[bad]), _NodeSpecBatch(nodes=[good])])
-
-    [node] = Planner(llm).plan(goal)
-
-    assert node.pass_condition.assertions == ["len(structured['items']) >= 1"]
-    assert len(llm.prompts) == 2
-    retry_prompt = llm.prompts[1]
-    assert retry_prompt.startswith(llm.prompts[0])  # original prompt plus a correction
-    assert "open('x')" in retry_prompt
-    assert "cannot be evaluated" in retry_prompt
-
-
-def test_plan_drops_assertions_still_invalid_after_the_reask():
-    bad = _NodeSpecBatch(nodes=[_planner_node_with("n_001", ["open('x')", "len(structured['a']) > 0"])])
-    llm = _ScriptedLLM([bad, bad])
-
-    [node] = Planner(llm).plan(_goal())
-
-    assert node.pass_condition.assertions == ["len(structured['a']) > 0"]
-    assert len(llm.prompts) == 2  # original + exactly one corrective re-ask
-
-
-def test_plan_does_not_reask_when_all_assertions_are_valid():
-    good = _NodeSpecBatch(nodes=[_planner_node_with("n_001", ["len(structured['a']) > 0"])])
-    llm = _ScriptedLLM([good])
-    Planner(llm).plan(_goal())
-    assert len(llm.prompts) == 1
-
-
-def test_expand_also_validates_assertions():
-    bad = _NodeSpecBatch(nodes=[_planner_node_with("n_002", ["structured.keys()"])])
-    llm = _ScriptedLLM([bad, bad])
-
-    [child] = Planner(llm).expand(_node("n_001"), _result("n_001"), _goal())
-
-    assert child.pass_condition.assertions == []
-    assert len(llm.prompts) == 2
 
 
 class _ScriptedLLM:
-    """Returns the given parsed batches in order, one per call; records every prompt."""
+    """Returns the given parsed models in order, one per call; records every prompt."""
 
-    def __init__(self, batches: list[_NodeSpecBatch]) -> None:
-        self._batches = list(batches)
+    def __init__(self, parsed: list) -> None:
+        self._parsed = list(parsed)
         self.prompts: list[str] = []
 
     def complete(self, *, prompt, system=None, schema=None, temperature=0.0):
         self.prompts.append(prompt)
-        batch = self._batches.pop(0)
+        model = self._parsed.pop(0)
+        assert isinstance(model, schema), f"scripted {type(model).__name__}, asked {schema}"
         return LLMResponse(
-            text=batch.model_dump_json(), parsed=batch,
-            tokens_in=1, tokens_out=1, latency_ms=0, model_id="fake",
+            text=model.model_dump_json(), parsed=model, tokens_in=1, tokens_out=1,
+            latency_ms=0, model_id="fake",
         )
+
+
+# --- plan(): the whole tree up front -------------------------------------------------
+
+
+def test_plan_returns_the_whole_tree_in_topological_order():
+    nodes = Planner(_ScriptedLLM([_scope(), _blueprint()])).plan(_goal())
+
+    assert [n.node_id for n in nodes] and len(nodes) == len(_SCOPE_SHAPE)
+    position = {n.node_id: i for i, n in enumerate(nodes)}
+    for node in nodes:
+        assert all(position[p] < position[node.node_id] for p in node.parent_ids)
+
+
+def test_plan_takes_structure_from_the_scope_and_computes_depth():
+    nodes = {n.node_id: n for n in Planner(_ScriptedLLM([_scope(), _blueprint()])).plan(_goal())}
+
+    assert nodes["c1"].parent_ids == ["c0", "b1"]
+    assert nodes["a0"].depth == 0
+    assert nodes["c1"].depth == 3  # longest path a0-a1-c0-c1, not the shortest via b0-b1
+    assert nodes["final"].depth == 5
+    assert nodes["final"].kind == NodeKind.DECISION
+
+
+def test_plan_reasks_once_when_the_scope_is_invalid():
+    cyclic = _scope({**_SCOPE_SHAPE, "a0": (NodeKind.RESEARCH, ["a3"])})
+    llm = _ScriptedLLM([cyclic, _scope(), _blueprint()])
+
+    Planner(llm).plan(_goal())
+
+    assert len(llm.prompts) == 3
+    assert llm.prompts[1].startswith(llm.prompts[0])
+    assert "cycle" in llm.prompts[1]
+
+
+def test_plan_raises_blueprint_error_when_the_scope_is_still_invalid():
+    cyclic = _scope({**_SCOPE_SHAPE, "a0": (NodeKind.RESEARCH, ["a3"])})
+    with pytest.raises(BlueprintError, match="cycle"):
+        Planner(_ScriptedLLM([cyclic, cyclic])).plan(_goal())
+
+
+def test_plan_reasks_then_drops_an_assertion_that_is_still_unevaluable():
+    bad = _blueprint(a1=["structured.keys()", "len(structured['items']) > 0"])
+    llm = _ScriptedLLM([_scope(), bad, bad])
+
+    nodes = {n.node_id: n for n in Planner(llm).plan(_goal())}
+
+    assert len(llm.prompts) == 3
+    assert "structured.keys()" in llm.prompts[2]
+    assert nodes["a1"].pass_condition.assertions == ["len(structured['items']) > 0"]
+
+
+def test_plan_raises_when_the_blueprint_is_still_structurally_wrong():
+    missing = _Blueprint(nodes=_blueprint().nodes[:-1])  # no node for "final"
+    with pytest.raises(BlueprintError, match="final"):
+        Planner(_ScriptedLLM([_scope(), missing, missing])).plan(_goal())
+
+
+# --- validation rules ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("shape", "expected"),
+    [
+        ({**_SCOPE_SHAPE, "a0": (NodeKind.RESEARCH, ["a3"])}, "cycle"),
+        ({**_SCOPE_SHAPE, "a1": (NodeKind.ANALYSIS, ["nope"])}, "unknown ids"),
+        ({**_SCOPE_SHAPE, "extra_leaf": (NodeKind.ANALYSIS, ["a0"])}, "exactly one item must be the final"),
+        ({**_SCOPE_SHAPE, "final": (NodeKind.SYNTHESIS, ["a3", "c2"])}, "must have kind 'decision'"),
+        (dict(list(_SCOPE_SHAPE.items())[:9]), "items; it must have"),
+    ],
+)
+def test_scope_problems_are_detected(shape, expected):
+    problems = _scope_problems(_scope(shape).items, MAX_DEPTH)
+    assert any(expected in p for p in problems), problems
+
+
+def test_scope_too_shallow_is_rejected():
+    flat = {f"s{i}": (NodeKind.RESEARCH, []) for i in range(9)}
+    flat["final"] = (NodeKind.DECISION, list(flat))
+    problems = _scope_problems(_scope(flat).items, MAX_DEPTH)
+    assert any("longest dependency chain" in p for p in problems)
+
+
+def test_valid_scope_has_no_problems():
+    assert _scope_problems(_scope().items, MAX_DEPTH) == []
+
+
+def test_semantic_check_must_name_an_ancestor():
+    nodes = _blueprint().nodes
+    nodes[1] = nodes[1].model_copy(
+        update={"pass_condition": PassCondition(assertions=[], semantic_check="Is it good?")}
+    )
+    problems = _blueprint_problems(nodes, _scope().items)
+    assert any("a1: semantic_check must name" in p for p in problems)
+
+
+def test_a_distant_ancestor_counts_as_named():
+    nodes = _blueprint().nodes
+    nodes[3] = nodes[3].model_copy(  # a3's ancestors are a2, a1, a0
+        update={"pass_condition": PassCondition(assertions=[], semantic_check="Uses a0?")}
+    )
+    assert _blueprint_problems(nodes, _scope().items) == []
+
+
+# --- expand(): bounded gap-filling ------------------------------------------------------
+
+
+def _reporter() -> NodeSpec:
+    return NodeSpec(
+        node_id="c1", parent_ids=["c0", "b1"], depth=3, kind=NodeKind.SYNTHESIS, title="c1",
+        node_goal="g", generated_prompt="p", pass_condition=PassCondition(assertions=[], semantic_check="?"),
+    )
+
+
+def _result(structured: dict) -> NodeResult:
+    return NodeResult(
+        node_id="c1", output="out", structured=structured, tokens_in=1, tokens_out=1,
+        latency_ms=1, model_id="fake", prompt_version="v1",
+    )
+
+
+def _planned() -> tuple[Planner, _ScriptedLLM]:
+    llm = _ScriptedLLM([_scope(), _blueprint()])
+    planner = Planner(llm)
+    planner.plan(_goal())
+    return planner, llm
+
+
+def test_expand_makes_no_llm_call_without_a_reported_gap():
+    planner, llm = _planned()
+    assert planner.expand(_reporter(), _result({"x": 1}), _goal()) == []
+    assert len(llm.prompts) == 2  # scope + blueprint only
+
+
+def test_expand_returns_one_node_under_the_reporter_for_a_real_gap():
+    planner, llm = _planned()
+    gap = _bp_node("regulatory_limits", ["c1"])
+    llm._parsed.append(_GapFill(node=gap))
+
+    [node] = planner.expand(
+        _reporter(), _result({"missing_prerequisites": ["What GST rules apply?"]}), _goal()
+    )
+
+    assert node.node_id == "regulatory_limits"
+    assert node.parent_ids == ["c1"]
+    assert node.depth == 4
+    assert "What GST rules apply?" in llm.prompts[-1]
+
+
+def test_expand_returns_nothing_when_the_gap_is_already_covered():
+    planner, llm = _planned()
+    llm._parsed.append(_GapFill(node=None))
+    assert planner.expand(_reporter(), _result({"missing_prerequisites": ["q?"]}), _goal()) == []
+
+
+def test_expand_drops_a_gap_node_reusing_a_planned_id():
+    planner, llm = _planned()
+    llm._parsed.append(_GapFill(node=_bp_node("a0", ["c1"])))
+    assert planner.expand(_reporter(), _result({"missing_prerequisites": ["q?"]}), _goal()) == []
+
+
+def test_expand_drops_a_gap_node_that_does_not_name_its_reporter():
+    planner, llm = _planned()
+    llm._parsed.append(_GapFill(node=_bp_node("new_gap", [])))  # check doesn't mention c1
+    assert planner.expand(_reporter(), _result({"missing_prerequisites": ["q?"]}), _goal()) == []

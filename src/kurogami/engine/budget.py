@@ -14,12 +14,22 @@ def signature(node_goal: str, parent_ids: list[str]) -> str:
 class Budget:
     """Tracks BudgetState against BudgetLimits. Never raises; callers check ok()."""
 
-    def __init__(self, limits: BudgetLimits | None = None) -> None:
+    def __init__(self, limits: BudgetLimits | None = None, *, max_gap_fills: int = 2) -> None:
         self.limits = limits or BudgetLimits()
         self.state = BudgetState()
+        # Lives here, not in the frozen BudgetLimits contract. Exhausting it is not a
+        # breach: runtime growth just switches off and the planned tree finishes.
+        self.max_gap_fills = max_gap_fills
+        self.gap_fills_used = 0
 
     def ok(self) -> bool:
         return not self.state.breached
+
+    def gap_fills_remaining(self) -> bool:
+        return self.gap_fills_used < self.max_gap_fills
+
+    def record_gap_fill(self) -> None:
+        self.gap_fills_used += 1
 
     def record_node_created(
         self, node_id: str, *, depth: int, node_goal: str, parent_ids: list[str]

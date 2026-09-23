@@ -72,15 +72,17 @@ class Executor:
 
         assertions = node.pass_condition.assertions
         required_keys = self._required_structured_keys(assertions)
+        key_rules = ""
         if required_keys:
-            parts.append(
-                _render(
-                    "execute_structured",
-                    keys=", ".join(required_keys),
-                    checks="\n".join(f"- {a}" for a in assertions),
-                    example=json.dumps(dict.fromkeys(required_keys, "..."), indent=2),
-                )
+            key_rules = _render(
+                "execute_keys",
+                keys=", ".join(required_keys),
+                checks="\n".join(f"- {a}" for a in assertions),
+                example=json.dumps(dict.fromkeys(required_keys, "..."), indent=2),
             )
+        # Always asked for, so any node can report an unplanned prerequisite
+        # (the only trigger for runtime gap-filling -- see agents/planner.py).
+        parts.append(_render("execute_structured", key_rules=key_rules))
 
         return "\n".join(parts)
 

@@ -1,13 +1,7 @@
 
-End your response with a fenced JSON code block. It must contain exactly these
-keys: {keys}. Every one of these keys must appear at the TOP level of the JSON
-object -- do not nest them inside a wrapper key or any other object.
-That JSON object is bound to the name `structured` and checked with these exact
-Python expressions, so each value must have the type and shape they imply (e.g. a
-list where len(...) is compared to a count, a number where it is compared to a
-number):
-{checks}
-Example layout:
-```json
-{example}
-```
+End your response with a fenced JSON code block (```json ... ```).
+{key_rules}
+Optional: if answering properly required a question that nobody upstream
+answered -- it is not covered anywhere in the context above -- add a top-level key
+"missing_prerequisites" listing those questions. Leave it out otherwise. Do not
+list things you can reasonably estimate yourself.

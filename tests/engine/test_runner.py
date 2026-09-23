@@ -17,6 +17,7 @@ from kurogami.contracts import (
     TraceRecord,
     Verdict,
 )
+from kurogami.engine.budget import Budget
 from kurogami.engine.runner import Runner
 
 
@@ -209,7 +210,10 @@ class _CollidingChildPlanner:
         ]
 
 
-def test_colliding_child_node_id_breaches_budget_cleanly_not_a_crash():
+def test_colliding_gap_fill_is_dropped_and_the_planned_tree_still_finishes():
+    """Regression: a node_id collision once silently corrupted the tree. A colliding
+    gap-fill is now rejected by the store and dropped -- the planned tree completes.
+    """
     runner = Runner(
         interpreter=_FakeInterpreter(),
         planner=_CollidingChildPlanner(),
@@ -222,9 +226,153 @@ def test_colliding_child_node_id_breaches_budget_cleanly_not_a_crash():
 
     report = runner.run("Should I launch my invoicing tool?")  # must not raise
 
-    assert report.budget_breached is True
-    # Either the loop detector (repeated identical signature) or
-    # max_backtracks catches this -- both are a clean stop, not a crash.
-    assert report.breach_reason is not None
-    assert "loop detected" in report.breach_reason or "max_backtracks" in report.breach_reason
-    assert report.snapshot.statuses["n_a"] in (NodeStatus.PENDING, NodeStatus.SKIPPED)
+    assert report.budget_breached is False
+    assert report.snapshot.statuses == {"n_a": NodeStatus.PASSED}
+
+
+# --- scoped planning: the whole tree is planned up front ---------------------------------
+
+
+def _spec(node_id: str, parents: list[str], depth: int, assertions: list[str] | None = None) -> NodeSpec:
+    return NodeSpec(
+        node_id=node_id,
+        parent_ids=parents,
+        depth=depth,
+        kind=NodeKind.ANALYSIS,
+        title=node_id,
+        node_goal=f"goal {node_id}",
+        generated_prompt=f"prompt for {node_id}",
+        pass_condition=PassCondition(assertions=assertions or [], semantic_check="ok?"),
+    )
+
+
+class _BlueprintPlanner:
+    """Plans a->b->c up front; expand() returns whatever gaps it was scripted with."""
+
+    def __init__(self, gaps: dict[str, list[NodeSpec]] | None = None) -> None:
+        self._gaps = gaps or {}
+        self.expand_calls: list[str] = []
+
+    def plan(self, goal: GoalSpec) -> list[NodeSpec]:
+        return [_spec("a", [], 0), _spec("b", ["a"], 1), _spec("c", ["b"], 2)]
+
+    def expand(self, node: NodeSpec, result: NodeResult, goal: GoalSpec) -> list[NodeSpec]:
+        self.expand_calls.append(node.node_id)
+        return self._gaps.pop(node.node_id, [])
+
+
+class _RecordingExecutor:
+    def __init__(self) -> None:
+        self.runs: list[NodeSpec] = []
+
+    def run(self, node: NodeSpec) -> NodeResult:
+        self.runs.append(node)
+        return NodeResult(
+            node_id=node.node_id, output=f"output for {node.node_id}", tokens_in=1,
+            tokens_out=1, latency_ms=1, model_id="fake", prompt_version="v1",
+        )
+
+
+class _FailFirstVerifier:
+    """FAILs `node_id` once, blaming `suspect`; PASSes everything else."""
+
+    def __init__(self, node_id: str, suspect: str) -> None:
+        self._node_id, self._suspect, self._done = node_id, suspect, False
+
+    def check(self, node: NodeSpec, result: NodeResult, context: dict[str, str]) -> Verdict:
+        if node.node_id == self._node_id and not self._done:
+            self._done = True
+            return Verdict(
+                node_id=node.node_id, verdict="FAIL", checked_by="llm",
+                reason=FailureReason(
+                    summary="contradicts an ancestor", violated="semantic", evidence="x",
+                    suspect_node_ids=[self._suspect],
+                ),
+            )
+        return Verdict(node_id=node.node_id, verdict="PASS", checked_by="llm")
+
+
+def _runner(planner, executor=None, verifier=None, interrupt=None, trace_sink=None, budget=None):
+    return Runner(
+        interpreter=_FakeInterpreter(),
+        planner=planner,
+        executor=executor or _RecordingExecutor(),
+        rules_checker=_AlwaysPassRules(),
+        verifier=verifier or _AlwaysPassVerifier(),
+        interrupt=interrupt or _NeverInterrupt(),
+        trace_sink=trace_sink or _MemoryTraceSink(),
+        budget=budget,
+    )
+
+
+def test_planned_tree_runs_to_completion_and_nothing_is_added():
+    planner = _BlueprintPlanner()
+    report = _runner(planner).run("goal")
+
+    assert report.budget_breached is False
+    assert report.snapshot.statuses == {
+        "a": NodeStatus.PASSED, "b": NodeStatus.PASSED, "c": NodeStatus.PASSED,
+    }
+    # Offered after every PASS; with no reported gap it adds nothing (and costs no LLM call).
+    assert planner.expand_calls == ["a", "b", "c"]
+
+
+def test_backtrack_regenerates_the_same_slots_as_versioned_clones():
+    report = _runner(_BlueprintPlanner(), verifier=_FailFirstVerifier("c", suspect="a")).run("goal")
+    statuses = report.snapshot.statuses
+
+    assert report.budget_breached is False
+    assert statuses["b"] == NodeStatus.INVALIDATED  # originals kept, flagged (ARCHITECTURE 5c)
+    assert statuses["c"] == NodeStatus.INVALIDATED
+    assert statuses["b~r1"] == NodeStatus.PASSED
+    assert statuses["c~r1"] == NodeStatus.PASSED
+    assert report.snapshot.specs["c~r1"].parent_ids == ["b~r1"]
+    assert report.snapshot.specs["b~r1"].parent_ids == ["a"]
+
+
+def test_a_plan_that_cannot_be_made_is_a_clean_outcome_not_a_crash():
+    from kurogami.agents.planner import BlueprintError
+
+    class _Unplannable(_BlueprintPlanner):
+        def plan(self, goal: GoalSpec) -> list[NodeSpec]:
+            raise BlueprintError("scope still invalid after correction: cycle")
+
+    sink = _MemoryTraceSink()
+    report = _runner(_Unplannable(), trace_sink=sink).run("goal")
+
+    assert report.aborted_reason is not None and "cycle" in report.aborted_reason
+    assert [r.node_id for r in sink.records] == ["__plan__"]
+    assert sink.closed is True
+
+
+def test_interrupt_constraints_reach_the_node_and_every_planned_descendant():
+    from kurogami.engine.interrupt import ScriptedInterrupt
+
+    executor = _RecordingExecutor()
+    interrupt = ScriptedInterrupt(["a"], {"a": ["Keep the price under INR 500/month."]})
+    _runner(_BlueprintPlanner(), executor=executor, interrupt=interrupt).run("goal")
+
+    for ran in executor.runs:
+        assert "Keep the price under INR 500/month." in ran.injected_constraints
+
+
+def test_gap_fill_feeds_the_reporters_pending_children():
+    gap = _spec("gap", ["a"], 1)
+    executor = _RecordingExecutor()
+    report = _runner(_BlueprintPlanner(gaps={"a": [gap]}), executor=executor).run("goal")
+
+    specs = report.snapshot.specs
+    assert specs["b"].parent_ids == ["a", "gap"]
+    assert specs["b"].depth == 2 and specs["c"].depth == 3  # pushed down by the new level
+    order = [n.node_id for n in executor.runs]
+    assert order.index("gap") < order.index("b")
+
+
+def test_gap_fills_stop_at_the_cap():
+    gaps = {"a": [_spec("g1", ["a"], 1)], "b": [_spec("g2", ["b"], 2)], "c": [_spec("g3", ["c"], 3)]}
+    planner = _BlueprintPlanner(gaps=gaps)
+    report = _runner(planner, budget=Budget(max_gap_fills=1)).run("goal")
+
+    assert "g1" in report.snapshot.specs
+    assert "g2" not in report.snapshot.specs and "g3" not in report.snapshot.specs
+    assert planner.expand_calls == ["a"]

@@ -140,10 +140,18 @@ def test_executor_forbids_nesting_required_keys_under_a_wrapper():
     assert "do not nest" in llm.last_prompt
 
 
-def test_executor_adds_no_json_instruction_when_there_are_no_assertions():
+def test_executor_adds_no_required_keys_when_there_are_no_assertions():
     llm = _CapturingLLM()
     Executor(llm).run(_node())
-    assert "fenced JSON" not in llm.last_prompt
+    assert "exactly these keys" not in llm.last_prompt
+
+
+def test_executor_always_lets_a_node_report_missing_prerequisites():
+    """The only trigger for runtime gap-filling -- offered even with no assertions."""
+    llm = _CapturingLLM()
+    Executor(llm).run(_node())
+    assert "fenced JSON" in llm.last_prompt
+    assert "missing_prerequisites" in llm.last_prompt
 
 
 def test_executor_prompt_version_is_stable_for_an_identical_prompt():
