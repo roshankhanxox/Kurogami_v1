@@ -23,6 +23,17 @@ def test_expand_prompt_allows_zero_children():
     assert "zero children" in content
 
 
+def test_plan_and_expand_prompts_require_python_boolean_assertions():
+    """Regression guard for a live-run incident: the planner once wrote
+    assertions as plain English ("The output includes a summary..."), which
+    crashed ast.parse() with a bare SyntaxError. Fixed in both the prompt
+    (this test) and agents/rules.py (catches SyntaxError as a schema FAIL).
+    """
+    for name in ("plan", "expand"):
+        normalized = " ".join(load_prompt(name).split())
+        assert "Python boolean expression" in normalized
+
+
 def test_interpret_prompt_requires_flagging_ambiguity_not_resolving_it():
     content = load_prompt("interpret")
     assert "ambiguities" in content

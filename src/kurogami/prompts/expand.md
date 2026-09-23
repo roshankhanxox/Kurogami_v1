@@ -25,7 +25,10 @@ Rules, all mandatory:
 4. Every child's depth must be this parent's depth plus one.
 5. Every field requirement from the planning stage applies here too:
    generated_prompt must be substantive (at least forty words, specific to
-   this goal), and pass_condition.semantic_check must reference a specific
-   ancestor node by name or id -- never a vacuous check.
+   this goal); pass_condition.assertions must be valid Python boolean
+   expressions over `structured`/`context` (never a natural-language
+   sentence -- see the planning stage's example); and
+   pass_condition.semantic_check must reference a specific ancestor node by
+   name or id -- never a vacuous check.
 
 Return a JSON array of NodeSpec objects (possibly empty), and nothing else.
