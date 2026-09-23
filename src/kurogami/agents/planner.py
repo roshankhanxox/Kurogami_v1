@@ -53,9 +53,9 @@ class BlueprintError(RuntimeError):
 
 
 class _ScopeItem(BaseModel):
-    """stage: seen live, gpt-4o-mini could not count a dependency chain's length, but
-    it can label stages. Dependencies may only point to earlier stages, so the
-    depth limit holds by construction and every rule is checkable per item.
+    """stage: seen live, models can't count a dependency chain's length but reason
+    well in stages, so they're asked to label one. It's a planning aid only --
+    validation runs on the dependency graph, never on the labels.
     """
 
     id: str
@@ -276,33 +276,10 @@ def _scope_problems(scope: list[_ScopeItem], max_depth: int) -> list[str]:
     if problems:
         return problems
 
-    stages = {item.id: item.stage for item in scope}
-    last_stage = max(stages.values())
-    for item in scope:
-        if not 1 <= item.stage <= max_depth + 1:
-            problems.append(f"{item.id} is in stage {item.stage}; stages run 1-{max_depth + 1}")
-        for d in item.depends_on:
-            if stages[d] >= item.stage:
-                problems.append(
-                    f"{item.id} (stage {item.stage}) depends on {d} (stage {stages[d]}); "
-                    f"an item may only depend on items in an earlier stage"
-                )
-    used = sorted(set(stages.values()))
-    if used != list(range(1, last_stage + 1)):
-        problems.append(f"stages must be numbered 1, 2, 3, ... with none skipped; used {used}")
-    if last_stage < MIN_TREE_DEPTH + 1:
-        problems.append(
-            f"only {last_stage} stages used; use at least {MIN_TREE_DEPTH + 1}, with most "
-            f"items depending on an answer from the stage before"
-        )
-    finals = [i.id for i in scope if i.stage == last_stage]
-    if len(finals) != 1:
-        problems.append(
-            f"the last stage ({last_stage}) must contain only the final decision; it has {finals}"
-        )
-    if problems:
-        return problems
-
+    # Stage labels are scaffolding that help the model shape the plan; the plan itself
+    # is the dependency graph. Seen live: gpt-4.1-mini kept a correct dependency
+    # (adoption <- product-market fit) but labelled both stage 2, and was rejected
+    # twice over the label. So only the graph is validated.
     order = _topological_order(deps)
     if order is None:
         return ["the dependencies contain a cycle"]
@@ -320,10 +297,16 @@ def _scope_problems(scope: list[_ScopeItem], max_depth: int) -> list[str]:
     if len(decisions) != 1:
         problems.append(f"exactly one item may have kind 'decision'; found {decisions}")
 
-    # Stages bound depth from above by construction; this catches the other side --
-    # stages used, but no item actually builds on the stage before.
+    # Depth is computed from the graph and the exact chain is named, so a correction
+    # is actionable (seen live: "the chain has 8 items" alone couldn't be fixed).
     chain = _longest_chain(order, deps)
-    if len(chain) < MIN_TREE_DEPTH + 1:
+    if len(chain) > max_depth + 1:
+        problems.append(
+            f"the longest dependency chain is {' -> '.join(chain)} ({len(chain)} items); no "
+            f"chain may exceed {max_depth + 1} -- let a later item depend on an earlier one "
+            f"directly instead of on the one just before it, or merge two links"
+        )
+    elif len(chain) < MIN_TREE_DEPTH + 1:
         problems.append(
             f"the longest dependency chain is {' -> '.join(chain)} ({len(chain)} items); at "
             f"least one chain must have {MIN_TREE_DEPTH + 1} -- make items depend on an "

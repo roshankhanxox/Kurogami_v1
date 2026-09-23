@@ -146,12 +146,12 @@ def test_plan_reasks_once_when_the_scope_is_invalid():
 
     assert len(llm.prompts) == 3
     assert llm.prompts[1].startswith(llm.prompts[0])
-    assert "only depend on items in an earlier stage" in llm.prompts[1]
+    assert "cycle" in llm.prompts[1]
 
 
 def test_plan_raises_blueprint_error_when_the_scope_is_still_invalid():
     cyclic = _scope({**_SCOPE_SHAPE, "a0": (NodeKind.RESEARCH, ["a3"])})
-    with pytest.raises(BlueprintError, match="earlier stage"):
+    with pytest.raises(BlueprintError, match="cycle"):
         Planner(_ScriptedLLM([cyclic, cyclic, cyclic])).plan(_goal())
 
 
@@ -179,8 +179,7 @@ def test_plan_raises_when_the_blueprint_is_still_structurally_wrong():
 @pytest.mark.parametrize(
     ("shape", "expected"),
     [
-        # With stages a cycle can't slip through: it must break the earlier-stage rule.
-        ({**_SCOPE_SHAPE, "a0": (NodeKind.RESEARCH, ["a3"])}, "earlier stage"),
+        ({**_SCOPE_SHAPE, "a0": (NodeKind.RESEARCH, ["a3"])}, "cycle"),
         ({**_SCOPE_SHAPE, "a1": (NodeKind.ANALYSIS, ["nope"])}, "unknown ids"),
         ({**_SCOPE_SHAPE, "extra_leaf": (NodeKind.ANALYSIS, ["a0"])}, "exactly one item must be the final"),
         ({**_SCOPE_SHAPE, "final": (NodeKind.SYNTHESIS, ["a3", "c2"])}, "must have kind 'decision'"),
@@ -196,29 +195,25 @@ def test_scope_too_shallow_is_rejected():
     flat = {f"s{i}": (NodeKind.RESEARCH, []) for i in range(9)}
     flat["final"] = (NodeKind.DECISION, list(flat))
     problems = _scope_problems(_scope(flat).items, MAX_DEPTH)
-    assert any("stages used; use at least 5" in p for p in problems), problems
+    assert any("at least one chain must have 5" in p for p in problems), problems
 
 
-def test_a_dependency_on_the_same_stage_is_named_per_item():
-    """Live incident: 'the chain has 8 items' couldn't be fixed by the model; a
-    per-item stage rule gives it a local, actionable correction instead.
+def test_a_mislabelled_stage_does_not_reject_a_valid_plan():
+    """Live incident: gpt-4.1-mini kept a correct dependency (adoption <- product-market
+    fit) but labelled both stage 2, and was rejected twice over the label. Stage labels
+    are a planning aid; only the dependency graph is validated.
     """
-    problems = _scope_problems(_scope(stages={"a2": 2}).items, MAX_DEPTH)
-    assert any("a2 (stage 2) depends on a1 (stage 2)" in p for p in problems), problems
+    assert _scope_problems(_scope(stages={"a2": 2, "final": 99}).items, MAX_DEPTH) == []
 
 
-def test_a_stage_beyond_the_depth_limit_is_rejected():
+def test_too_deep_a_plan_names_the_exact_chain_to_shorten():
+    """Live incident: 'the chain has 8 items' alone couldn't be fixed by the model."""
     chain = {f"d{i}": (NodeKind.ANALYSIS, [f"d{i-1}"] if i else []) for i in range(8)}
     chain["d0"] = (NodeKind.RESEARCH, [])
     chain["side"] = (NodeKind.RESEARCH, [])
     chain["final"] = (NodeKind.DECISION, ["d7", "side"])
     problems = _scope_problems(_scope(chain).items, MAX_DEPTH)
-    assert any("stages run 1-7" in p for p in problems), problems
-
-
-def test_the_last_stage_holds_only_the_decision():
-    problems = _scope_problems(_scope(stages={"c2": 6}).items, MAX_DEPTH)
-    assert any("last stage (6) must contain only the final decision" in p for p in problems)
+    assert any("d0 -> d1 -> d2" in p and "-> final (9 items)" in p for p in problems), problems
 
 
 def test_a_chain_of_exactly_max_depth_plus_one_items_is_allowed():
