@@ -3,13 +3,38 @@
 from pydantic import BaseModel
 
 from kurogami.agents._prompt_loader import load_prompt
-from kurogami.contracts import GoalSpec, LLMPort, NodeResult, NodeSpec
+from kurogami.contracts import GoalSpec, LLMPort, NodeKind, NodeResult, NodeSpec, PassCondition
+
+
+class _PlannerNodeSpec(BaseModel):
+    """Everything in NodeSpec except context and injected_constraints.
+
+    Those two fields are engine-managed (assembled ancestor context, and
+    interrupt-injected constraints) -- the planner never legitimately fills
+    them; they're always empty on a freshly created node. Excluding them
+    also sidesteps a real incompatibility: NodeSpec gives them defaults, but
+    OpenAI's Structured Outputs mode requires every schema property to
+    appear in "required" with no implicit defaults, so a schema built
+    directly from NodeSpec is rejected by the API.
+    """
+
+    node_id: str
+    parent_ids: list[str]
+    depth: int
+    kind: NodeKind
+    title: str
+    node_goal: str
+    generated_prompt: str
+    pass_condition: PassCondition
+
+    def to_node_spec(self) -> NodeSpec:
+        return NodeSpec(**self.model_dump())
 
 
 class _NodeSpecBatch(BaseModel):
     """Decoding envelope only: the planner's LLM call returns a list, not one model."""
 
-    nodes: list[NodeSpec]
+    nodes: list[_PlannerNodeSpec]
 
 
 class Planner:
@@ -44,4 +69,4 @@ class Planner:
     def _unpack(parsed: BaseModel | None) -> list[NodeSpec]:
         if not isinstance(parsed, _NodeSpecBatch):
             raise TypeError(f"Planner expected a parsed _NodeSpecBatch, got {type(parsed).__name__}")
-        return parsed.nodes
+        return [node.to_node_spec() for node in parsed.nodes]

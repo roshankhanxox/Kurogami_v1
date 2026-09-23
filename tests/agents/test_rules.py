@@ -104,6 +104,38 @@ def test_disallowed_name_is_rejected():
     assert verdict.reason.violated == "schema"
 
 
+def test_is_not_none_is_permitted_syntax():
+    """Regression: seen live -- a real assertion used `is not None`, which the
+    whitelist originally rejected (Is/IsNot weren't in _ALLOWED_NODE_TYPES).
+    """
+    node = _node(["structured['budget'] is not None"])
+    result = _result({"budget": 500})
+    verdict = RuleChecker().check(node, result)
+    assert verdict.verdict == "PASS"
+
+
+def test_is_none_is_permitted_syntax():
+    node = _node(["structured['x'] is None"])
+    result = _result({"x": None})
+    verdict = RuleChecker().check(node, result)
+    assert verdict.verdict == "PASS"
+
+
+def test_natural_language_assertion_is_a_typed_fail_not_a_crash():
+    """Regression: seen live against a real LLM -- the planner wrote
+    "The output includes a summary of current tools used by freelance
+    designers." as an assertion. ast.parse() raises a bare SyntaxError on
+    that, which must never propagate out of RuleChecker.check().
+    """
+    node = _node(["The output includes a summary of current tools used."])
+    result = _result({})
+
+    verdict = RuleChecker().check(node, result)
+
+    assert verdict.verdict == "FAIL"
+    assert verdict.reason.violated == "schema"
+
+
 def test_attribute_access_is_rejected():
     node = _node(["structured.__class__"])
     result = _result({})

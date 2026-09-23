@@ -26,8 +26,15 @@ Rules, all mandatory:
    - generated_prompt: the full prompt the child agent will actually receive.
      This must be substantive, at least forty words, and specific to this
      goal -- not generic boilerplate copied across nodes.
-   - pass_condition.assertions: cheap, deterministic checks against the
-     node's own structured output.
+   - pass_condition.assertions: a list of valid Python boolean expressions,
+     evaluated literally against the node's own structured output -- never
+     a natural-language sentence. Every expression may only reference the
+     name `structured` (a dict), `context` (a dict), and the functions
+     `len`, `any`, `all`. Example, given a structured output with a
+     "competitors" list: "len(structured['competitors']) >= 3"
+     A plain-English description such as "the output lists competitors" is
+     not an assertion and will crash evaluation -- an empty list is fine if
+     no cheap check applies, but never write English there.
    - pass_condition.semantic_check: one question a verifier will later ask
      about the output. For any node beyond the very first, this question
      must reference a specific ancestor node's output by name or id -- a

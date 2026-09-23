@@ -2,16 +2,30 @@
 
 import hashlib
 import json
+import re
 import time
 from typing import Any
 
 from kurogami.contracts import LLMPort, NodeKind, NodeResult, NodeSpec, SearchPort
+
+_STRUCTURED_KEY_PATTERN = re.compile(r"structured\[['\"](\w+)['\"]\]")
+_FENCED_JSON_PATTERN = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
 
 
 class Executor:
     """Sends NodeSpec.generated_prompt (plus assembled context) to the LLM.
 
     SearchPort is consulted only for kind=RESEARCH nodes (ARCHITECTURE.md B6).
+
+    The executor asks the model in free text, with no schema, so `structured`
+    would be empty far more often than not (seen live: an assertion
+    referencing structured['market_trends'] raised KeyError every time,
+    because nothing ever told the model to produce that key). Rather than
+    trust the planner's generated_prompt to independently describe a JSON
+    shape that happens to match its own assertions, this extracts the keys
+    the assertions actually reference -- deterministically, via regex, no
+    LLM guessing -- and appends an explicit instruction to return exactly
+    those keys as a fenced JSON block.
     """
 
     def __init__(self, llm: LLMPort, search: SearchPort | None = None) -> None:
@@ -54,15 +68,46 @@ class Executor:
             results = "\n".join(f"- {hit.title}: {hit.snippet} ({hit.url})" for hit in hits)
             parts.append(f"\nSearch results:\n{results}")
 
+        required_keys = self._required_structured_keys(node.pass_condition.assertions)
+        if required_keys:
+            keys_list = ", ".join(required_keys)
+            parts.append(
+                "\nEnd your response with a fenced JSON code block containing exactly "
+                f"these keys: {keys_list}. Example:\n```json\n"
+                + json.dumps(dict.fromkeys(required_keys, "..."), indent=2)
+                + "\n```"
+            )
+
         return "\n".join(parts)
 
     @staticmethod
+    def _required_structured_keys(assertions: list[str]) -> list[str]:
+        keys: list[str] = []
+        for assertion in assertions:
+            for match in _STRUCTURED_KEY_PATTERN.finditer(assertion):
+                if match.group(1) not in keys:
+                    keys.append(match.group(1))
+        return keys
+
+    @staticmethod
     def _try_parse_structured(text: str) -> dict[str, Any]:
-        try:
-            parsed = json.loads(text)
-        except (json.JSONDecodeError, TypeError):
-            return {}
-        return parsed if isinstance(parsed, dict) else {}
+        candidates: list[str] = []
+        fenced = _FENCED_JSON_PATTERN.search(text)
+        if fenced is not None:
+            candidates.append(fenced.group(1))
+        candidates.append(text)
+        start, end = text.find("{"), text.rfind("}")
+        if start != -1 and end > start:
+            candidates.append(text[start : end + 1])
+
+        for candidate in candidates:
+            try:
+                parsed = json.loads(candidate)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(parsed, dict):
+                return parsed
+        return {}
 
     @staticmethod
     def _prompt_version(generated_prompt: str) -> str:

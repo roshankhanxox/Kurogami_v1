@@ -12,6 +12,7 @@ dependencies = [
     "typer",
     "rich",
     "python-dotenv",
+    "openai>=1.40",
 ]
 
 [project.optional-dependencies]

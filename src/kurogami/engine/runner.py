@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from kurogami.contracts import (
+    FailureReason,
     GoalSpec,
     InterruptPort,
     NodeResult,
@@ -20,7 +21,7 @@ from kurogami.contracts import (
 )
 from kurogami.engine import backtrack, context, scheduler
 from kurogami.engine.budget import Budget
-from kurogami.engine.store import TreeStore
+from kurogami.engine.store import DuplicateNodeError, TreeStore
 
 
 class Interpreter(Protocol):
@@ -127,14 +128,33 @@ class Runner:
             if verdict.verdict == "PASS":
                 store.mark_passed(node.node_id, result)
                 children = self._planner.expand(node, result, goal)
-                for child in children:
-                    self._budget.record_node_created(
-                        child.node_id,
-                        depth=child.depth,
-                        node_goal=child.node_goal,
-                        parent_ids=child.parent_ids,
+                try:
+                    for child in children:
+                        self._budget.record_node_created(
+                            child.node_id,
+                            depth=child.depth,
+                            node_goal=child.node_goal,
+                            parent_ids=child.parent_ids,
+                        )
+                    store.attach(node, children)
+                except DuplicateNodeError as exc:
+                    # The planner produced a child node_id colliding with an
+                    # existing node -- structurally invalid, not a real PASS.
+                    # invalidate_subtree() below reverts mark_passed() above.
+                    verdict = Verdict(
+                        node_id=node.node_id,
+                        verdict="FAIL",
+                        checked_by="rules",
+                        reason=FailureReason(
+                            summary="planner produced a colliding node_id",
+                            violated="schema",
+                            evidence=str(exc),
+                        ),
                     )
-                store.attach(node, children)
+                    assert verdict.reason is not None
+                    event = backtrack.apply(store, node.node_id, verdict.reason)
+                    backtrack_target = event.target_node_id
+                    self._budget.record_backtrack()
             else:
                 store.mark_failed(node.node_id)
                 assert verdict.reason is not None  # a FAIL verdict always carries a reason

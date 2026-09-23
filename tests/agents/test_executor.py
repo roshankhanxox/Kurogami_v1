@@ -72,6 +72,49 @@ def test_executor_falls_back_to_empty_structured_on_non_json_output():
     assert result.structured == {}
 
 
+def test_executor_extracts_json_from_a_fenced_code_block_in_prose():
+    """Regression: a real LLM given a free-text prompt often writes prose with
+    a trailing JSON block, not pure JSON -- json.loads() on the whole text
+    fails in that case.
+    """
+    text = 'Here is my analysis.\n\n```json\n{"market_trends": ["a", "b"]}\n```\n'
+    result = Executor(_CapturingLLM(text=text)).run(_node())
+    assert result.structured == {"market_trends": ["a", "b"]}
+
+
+def test_executor_extracts_a_bare_json_object_embedded_in_prose():
+    text = 'Some prose before. {"key": "value"} and prose after.'
+    result = Executor(_CapturingLLM(text=text)).run(_node())
+    assert result.structured == {"key": "value"}
+
+
+def test_executor_asks_for_the_keys_its_own_assertions_reference():
+    """Regression: seen live -- an assertion referencing structured['market_trends']
+    raised KeyError every time, because nothing ever told the model to
+    produce that key. The executor now derives required keys from the
+    node's own assertions, deterministically (no LLM guessing), and asks
+    for exactly those.
+    """
+    node = _node(
+        pass_condition=PassCondition(
+            assertions=["len(structured['competitors']) >= 3", "structured['market_trends'] != []"],
+            semantic_check="ok?",
+        )
+    )
+    llm = _CapturingLLM()
+    Executor(llm).run(node)
+
+    assert "competitors" in llm.last_prompt
+    assert "market_trends" in llm.last_prompt
+    assert "```json" in llm.last_prompt
+
+
+def test_executor_adds_no_json_instruction_when_there_are_no_assertions():
+    llm = _CapturingLLM()
+    Executor(llm).run(_node())
+    assert "fenced JSON" not in llm.last_prompt
+
+
 def test_executor_prompt_version_is_stable_for_an_identical_prompt():
     llm = _CapturingLLM()
     node = _node()
