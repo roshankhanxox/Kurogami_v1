@@ -66,14 +66,16 @@ class Budget:
                 f"max_tokens_total {self.limits.max_tokens_total}"
             )
 
-    def record_node_retry(self, node_id: str) -> None:
+    def record_node_retry(self, node_id: str) -> bool:
+        """Count a self-blamed retry; False once the node is out of retries.
+
+        Seen live: one root node failing on its own burned the whole run's backtrack
+        budget and stopped everything. Its retries are now its own allowance -- when
+        it runs out, that node gives up and the rest of the tree keeps running.
+        """
         count = self.state.node_retries.get(node_id, 0) + 1
         self.state.node_retries[node_id] = count
-        if count > self.limits.max_node_retries:
-            self._breach(
-                f"node {node_id} retried {count} times, exceeding "
-                f"max_node_retries {self.limits.max_node_retries}"
-            )
+        return count <= self.limits.max_node_retries
 
     def _breach(self, reason: str) -> None:
         self.state.breached = True

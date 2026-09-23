@@ -6,6 +6,7 @@ anthropic fails with a clear error rather than pretending to work.
 """
 
 import json
+import os
 import uuid
 from pathlib import Path
 from typing import Annotated, Any
@@ -19,6 +20,7 @@ from kurogami.adapters.llm.fake import FakeLLM
 from kurogami.adapters.llm.openai import DEFAULT_MODEL, OpenAILLM
 from kurogami.adapters.llm.recording import RecordingLLM
 from kurogami.adapters.search.fake import FakeSearch
+from kurogami.adapters.search.tavily import TavilySearch
 from kurogami.adapters.trace.jsonl import JsonlTraceSink
 from kurogami.agents.executor import Executor
 from kurogami.agents.interpreter import Interpreter
@@ -68,9 +70,11 @@ def _build_llm(
 def _build_search(name: str) -> SearchPort | None:
     if name == "none":
         return None
-    if name != "fake":
-        raise typer.BadParameter(f"--search {name} is not available yet; only 'fake' or 'none'.")
-    return FakeSearch()
+    if name == "fake":
+        return FakeSearch()
+    if name == "tavily":
+        return TavilySearch(os.environ.get("TAVILY_API_KEY", ""))
+    raise typer.BadParameter(f"--search {name} is not available; use 'tavily', 'fake' or 'none'.")
 
 
 def _load_raw_text(goal_file: Path) -> str:
@@ -168,6 +172,9 @@ def run_cmd(
         raise typer.Exit(code=1)
     if report.budget_breached:
         console.print(f"[bold red]budget breached: {report.breach_reason}[/bold red]")
+        raise typer.Exit(code=1)
+    if report.incomplete_reason:
+        console.print(f"[bold red]incomplete: {report.incomplete_reason}[/bold red]")
         raise typer.Exit(code=1)
 
 

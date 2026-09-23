@@ -161,9 +161,18 @@ class TreeStore:
         return ids
 
     def invalidate_subtree(self, target_id: str) -> list[str]:
-        """Mark target PENDING, every live descendant INVALIDATED. Nothing is deleted."""
+        """Mark target PENDING and every live descendant that has run INVALIDATED.
+
+        Descendants that never ran consumed nothing stale -- they stay PENDING and just
+        wait for the regenerated target (seen live: never-run nodes rendered as
+        "invalidated", which misread as thrown-away work). Nothing is deleted.
+        """
         self.get(target_id)
-        invalidated = [n.node_id for n in self._live_descendants(target_id)]
+        invalidated = [
+            n.node_id
+            for n in self._live_descendants(target_id)
+            if self._statuses[n.node_id] in (NodeStatus.PASSED, NodeStatus.FAILED)
+        ]
         for nid in invalidated:
             self._statuses[nid] = NodeStatus.INVALIDATED
         self._statuses[target_id] = NodeStatus.PENDING
@@ -184,9 +193,10 @@ class TreeStore:
         """
         self._awaiting_regeneration.discard(target_id)
         live = sorted(self._live_descendants(target_id), key=lambda n: n.depth)
-        remap = {n.node_id: self._next_version(n.node_id) for n in live}
+        stale = [n for n in live if self._statuses[n.node_id] == NodeStatus.INVALIDATED]
+        remap = {n.node_id: self._next_version(n.node_id) for n in stale}
         clones: list[NodeSpec] = []
-        for node in live:
+        for node in stale:
             condition = node.pass_condition
             clone = node.model_copy(
                 update={
@@ -204,6 +214,23 @@ class TreeStore:
             )
             self._add(clone)
             clones.append(clone)
+        # Never-run descendants keep their slot but must now wait on the clones.
+        for node in live:
+            if node.node_id in remap or not any(p in remap for p in node.parent_ids):
+                continue
+            condition = node.pass_condition
+            self._specs[node.node_id] = node.model_copy(
+                update={
+                    "parent_ids": [remap.get(p, p) for p in node.parent_ids],
+                    "generated_prompt": _remap_ids(node.generated_prompt, remap),
+                    "pass_condition": condition.model_copy(
+                        update={
+                            "assertions": [_remap_ids(a, remap) for a in condition.assertions],
+                            "semantic_check": _remap_ids(condition.semantic_check, remap),
+                        }
+                    ),
+                }
+            )
         self._superseded.update(remap)
         self._awaiting_regeneration.difference_update(remap)
         return clones

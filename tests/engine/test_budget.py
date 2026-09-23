@@ -41,12 +41,12 @@ def test_budget_token_breach():
     assert not budget.ok()
 
 
-def test_budget_node_retry_breach():
+def test_node_retry_cap_is_per_node_and_not_a_run_breach():
     budget = Budget(BudgetLimits(max_node_retries=1))
-    budget.record_node_retry("n_004")
-    assert budget.ok()
-    budget.record_node_retry("n_004")
-    assert not budget.ok()
+    assert budget.record_node_retry("n_004") is True
+    assert budget.record_node_retry("n_004") is False  # out of retries
+    assert budget.record_node_retry("n_005") is True  # another node's own allowance
+    assert budget.ok()  # the run itself carries on
 
 
 def test_budget_loop_detector_breach_on_identical_signature():

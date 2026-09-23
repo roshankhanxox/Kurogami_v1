@@ -175,22 +175,42 @@ def test_regeneration_clones_the_subtree_and_remaps_ancestor_references():
     assert not store.awaiting_regeneration("a")
 
 
-def test_a_higher_backtrack_before_regeneration_still_rebuilds_the_whole_subtree():
-    """b is backtracked (c invalidated) but, before b re-passes, a is backtracked too.
-    Regenerating a must rebuild b AND c -- not just what the second backtrack touched.
+def test_a_higher_backtrack_before_regeneration_rebuilds_only_what_ran_on_stale_input():
+    """b is backtracked (c invalidated, b re-queued) and, before b re-runs, a is
+    backtracked too. b never ran again, so it just runs fresh after a; only c --
+    which did run on stale input -- is cloned, and it waits on b.
     """
     store = _chain()
     for n in ("a", "b", "c"):
         store.mark_passed(n, _dummy_result(n))
     store.invalidate_subtree("b")  # c invalidated, b pending
-    store.invalidate_subtree("a")  # b invalidated, a pending
+    store.invalidate_subtree("a")  # b is pending (never re-ran): left alone
+    assert store.status("b") == NodeStatus.PENDING
     store.mark_passed("a", _dummy_result("a"))
 
     clones = {c.node_id: c for c in store.regenerate_subtree("a")}
 
-    assert set(clones) == {"b~r1", "c~r1"}
-    assert clones["c~r1"].parent_ids == ["b~r1"]
-    assert not store.awaiting_regeneration("b")  # stale entry cleared with its node
+    assert set(clones) == {"c~r1"}
+    assert clones["c~r1"].parent_ids == ["b"]
+    assert store.status("b") == NodeStatus.PENDING
+
+
+def test_descendants_that_never_ran_are_not_invalidated_and_wait_on_clones():
+    """Seen live: never-run nodes rendered as 'invalidated', misreading as lost work."""
+    store = _chain()
+    store.mark_passed("a", _dummy_result("a"))
+    store.mark_passed("b", _dummy_result("b"))  # c has not run yet
+
+    invalidated = store.invalidate_subtree("a")
+
+    assert invalidated == ["b"]
+    assert store.status("c") == NodeStatus.PENDING
+    store.mark_passed("a", _dummy_result("a"))
+    [clone] = store.regenerate_subtree("a")
+    assert clone.node_id == "b~r1"
+    c = store.get("c")
+    assert c.parent_ids == ["b~r1"]  # rewired to the fresh copy
+    assert c.pass_condition.semantic_check == "Consistent with b~r1?"
 
 
 def test_second_regeneration_gets_the_next_version():

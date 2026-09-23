@@ -59,6 +59,7 @@ class RunReport:
     budget_breached: bool
     breach_reason: str | None
     aborted_reason: str | None = None
+    incomplete_reason: str | None = None
 
 
 class Runner:
@@ -98,6 +99,7 @@ class Runner:
         for planned in blueprint:
             self._record_created(planned)
         store.seed_blueprint(blueprint)
+        gave_up: list[str] = []
 
         while store.has_pending() and self._budget.ok():
             node = scheduler.next(store)
@@ -147,9 +149,18 @@ class Runner:
             else:
                 store.mark_failed(node.node_id)
                 assert verdict.reason is not None  # a FAIL verdict always carries a reason
-                event = backtrack.apply(store, node.node_id, verdict.reason)
-                backtrack_target = event.target_node_id
-                self._budget.record_backtrack()
+                blamed_id = backtrack.locate(verdict.reason, store, node.node_id)
+                if blamed_id == node.node_id and not self._budget.record_node_retry(node.node_id):
+                    # Out of its own retries: it stays FAILED and the rest of the tree
+                    # keeps running (seen live: one node burned the whole run).
+                    gave_up.append(f"{node.node_id} ({verdict.reason.summary})")
+                else:
+                    event = backtrack.apply(store, node.node_id, verdict.reason)
+                    backtrack_target = event.target_node_id
+                    # A node blaming itself is retrying, not backtracking to an ancestor;
+                    # only real backtracks spend the run-wide allowance.
+                    if backtrack_target != node.node_id:
+                        self._budget.record_backtrack()
 
             self._trace_sink.emit(
                 TraceRecord(
@@ -195,12 +206,43 @@ class Runner:
                 )
             )
 
+        incomplete_reason: str | None = None
+        if self._budget.ok() and (gave_up or store.has_pending()):
+            blocked = store.pending_ids()
+            for pending_id in blocked:
+                store.mark_skipped(pending_id)
+            incomplete_reason = (
+                f"gave up on {', '.join(gave_up) or 'no node'}; "
+                f"{len(blocked)} node(s) depending on it could not run"
+            )
+            seq += 1
+            self._trace_sink.emit(
+                TraceRecord(
+                    run_id=run_id,
+                    seq=seq,
+                    node_id="__incomplete__",
+                    parent_node_id=None,
+                    depth=0,
+                    generated_prompt="",
+                    node_goal="finish the planned tree",
+                    output="",
+                    verifier_verdict="FAIL",
+                    failure_reason=incomplete_reason,
+                    backtrack_target=None,
+                    tokens_in=0,
+                    tokens_out=0,
+                    latency_ms=0,
+                    human_interrupt=False,
+                )
+            )
+
         self._trace_sink.close()
         return RunReport(
             run_id=run_id,
             snapshot=store.snapshot(),
             budget_breached=not self._budget.ok(),
             breach_reason=self._budget.state.breach_reason,
+            incomplete_reason=incomplete_reason,
         )
 
     def _record_created(self, node: NodeSpec) -> None:

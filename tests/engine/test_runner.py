@@ -376,3 +376,39 @@ def test_gap_fills_stop_at_the_cap():
     assert "g1" in report.snapshot.specs
     assert "g2" not in report.snapshot.specs and "g3" not in report.snapshot.specs
     assert planner.expand_calls == ["a"]
+
+
+class _AlwaysFailSelfVerifier:
+    """FAILs `node_id` every time, blaming only itself."""
+
+    def __init__(self, node_id: str) -> None:
+        self._node_id = node_id
+
+    def check(self, node: NodeSpec, result: NodeResult, context: dict[str, str]) -> Verdict:
+        if node.node_id == self._node_id:
+            return Verdict(
+                node_id=node.node_id, verdict="FAIL", checked_by="llm",
+                reason=FailureReason(summary="not good enough", violated="semantic", evidence="x"),
+            )
+        return Verdict(node_id=node.node_id, verdict="PASS", checked_by="llm")
+
+
+class _TwoBranchPlanner(_BlueprintPlanner):
+    def plan(self, goal: GoalSpec) -> list[NodeSpec]:
+        return [_spec("a", [], 0), _spec("b", ["a"], 1), _spec("x", [], 0), _spec("y", ["x"], 1)]
+
+
+def test_a_self_failing_node_gives_up_without_spending_the_backtrack_budget():
+    budget = Budget()
+    report = _runner(
+        _TwoBranchPlanner(), verifier=_AlwaysFailSelfVerifier("a"), budget=budget
+    ).run("goal")
+    statuses = report.snapshot.statuses
+
+    assert statuses["a"] == NodeStatus.FAILED  # gave up after its own retries
+    assert statuses["b"] == NodeStatus.SKIPPED  # could never run
+    assert statuses["x"] == NodeStatus.PASSED and statuses["y"] == NodeStatus.PASSED
+    assert budget.state.backtracks == 0  # self-retries are not ancestor backtracks
+    assert budget.state.node_retries["a"] == 3  # 1 attempt + max_node_retries (2) retries
+    assert report.budget_breached is False
+    assert report.incomplete_reason is not None and "gave up on a" in report.incomplete_reason

@@ -23,7 +23,9 @@ def apply(store: TreeStore, failing_node_id: str, reason: FailureReason) -> Back
     """Locate the target, invalidate its subtree, and requeue it with the failure context."""
     target_id = locate(reason, store, failing_node_id)
     invalidated = store.invalidate_subtree(target_id)
-    store.requeue(target_id, with_failure_context=reason.summary)
+    # Seen live: retries saw only the summary, never the verifier's specifics
+    # (e.g. which competitors were missing).
+    store.requeue(target_id, with_failure_context=f"{reason.summary} Evidence: {reason.evidence}")
 
     event = BacktrackEvent(
         failing_node_id=failing_node_id,

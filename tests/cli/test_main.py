@@ -201,9 +201,11 @@ def test_run_completes_the_planned_tree(tmp_path, use_llm):
     assert all(r["verifier_verdict"] == "PASS" for r in records)
 
 
-def test_run_budget_breach_is_a_clean_outcome_not_a_crash(tmp_path, use_llm):
-    """A root whose assertion is always false: FAIL -> backtrack to itself -> FAIL
-    again, until max_backtracks stops the run cleanly (R7)."""
+def test_a_node_that_keeps_failing_gives_up_and_the_rest_of_the_tree_still_runs(tmp_path, use_llm):
+    """A root whose assertion is always false. Seen live: such a node used to burn the
+    run-wide backtrack budget and stop everything. Now it gets its own retries, gives
+    up, and the independent branch (b0 -> b1) still runs; its dependents are skipped.
+    """
     trace_dir = tmp_path / "traces"
     use_llm(_fake(blueprint=_blueprint(assertions={"a0": ["False"]})))
 
@@ -212,10 +214,12 @@ def test_run_budget_breach_is_a_clean_outcome_not_a_crash(tmp_path, use_llm):
     )
 
     assert result.exit_code == 1
-    assert "budget breached" in result.stdout
+    assert "incomplete: gave up on a0" in " ".join(result.stdout.split())
     records = _trace_records(trace_dir)
-    assert records[0]["verifier_verdict"] == "FAIL"
-    assert records[-1]["node_id"] == "__budget__"
+    assert [r["verifier_verdict"] for r in records if r["node_id"] == "a0"] == ["FAIL"] * 3
+    passed = {r["node_id"] for r in records if r["verifier_verdict"] == "PASS"}
+    assert {"b0", "b1"} <= passed
+    assert records[-1]["node_id"] == "__incomplete__"
 
 
 def test_run_aborts_cleanly_when_planning_fails(tmp_path, use_llm):
