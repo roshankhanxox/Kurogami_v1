@@ -123,7 +123,7 @@ def test_run_command_fails_backtracks_and_breaches_budget_cleanly(tmp_path):
         pass_condition=PassCondition(assertions=["False"], semantic_check="ok?"),
     )
     retried_node = root_node.model_copy(
-        update={"context": {"_backtrack_reason": "a deterministic assertion failed"}}
+        update={"context": {"_backtrack_reason": "assertion evaluated to False: False"}}
     )
     # Executor._build_prompt is "private" but pure (no self.* access besides
     # search, unused for an ANALYSIS node), so calling it directly here

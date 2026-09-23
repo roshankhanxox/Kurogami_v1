@@ -6,10 +6,15 @@ import re
 import time
 from typing import Any
 
+from kurogami.agents._prompt_loader import load_prompt
 from kurogami.contracts import LLMPort, NodeKind, NodeResult, NodeSpec, SearchPort
 
 _STRUCTURED_KEY_PATTERN = re.compile(r"structured\[['\"](\w+)['\"]\]")
 _FENCED_JSON_PATTERN = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
+
+
+def _render(prompt_name: str, **fields: str) -> str:
+    return load_prompt(prompt_name).format(**fields).rstrip("\n")
 
 
 class Executor:
@@ -54,30 +59,27 @@ class Executor:
         parts = [node.generated_prompt]
 
         if node.context:
-            parts.append("\nAncestor context:\n" + json.dumps(node.context, indent=2))
+            parts.append(_render("execute_context", context_json=json.dumps(node.context, indent=2)))
 
         if node.injected_constraints:
             constraints = "\n".join(f"- {c}" for c in node.injected_constraints)
-            parts.append(
-                "\nAdditional constraints injected by a human reviewer, which this "
-                f"output MUST honour:\n{constraints}"
-            )
+            parts.append(_render("execute_constraints", constraints=constraints))
 
         if node.kind == NodeKind.RESEARCH and self._search is not None:
             hits = self._search.search(node.node_goal)
             results = "\n".join(f"- {hit.title}: {hit.snippet} ({hit.url})" for hit in hits)
-            parts.append(f"\nSearch results:\n{results}")
+            parts.append(_render("execute_search", results=results))
 
-        required_keys = self._required_structured_keys(node.pass_condition.assertions)
+        assertions = node.pass_condition.assertions
+        required_keys = self._required_structured_keys(assertions)
         if required_keys:
-            keys_list = ", ".join(required_keys)
             parts.append(
-                "\nEnd your response with a fenced JSON code block. It must contain "
-                f"exactly these keys: {keys_list}. Every one of these keys must appear "
-                "at the TOP level of the JSON object -- do not nest them inside a "
-                "wrapper key or any other object. Example:\n```json\n"
-                + json.dumps(dict.fromkeys(required_keys, "..."), indent=2)
-                + "\n```"
+                _render(
+                    "execute_structured",
+                    keys=", ".join(required_keys),
+                    checks="\n".join(f"- {a}" for a in assertions),
+                    example=json.dumps(dict.fromkeys(required_keys, "..."), indent=2),
+                )
             )
 
         return "\n".join(parts)

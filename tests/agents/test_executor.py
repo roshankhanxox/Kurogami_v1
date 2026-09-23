@@ -109,6 +109,18 @@ def test_executor_asks_for_the_keys_its_own_assertions_reference():
     assert "```json" in llm.last_prompt
 
 
+def test_executor_shows_the_exact_assertions_so_value_shapes_match():
+    """Regression: seen live -- the model returned user_feedback as a single
+    string where the assertion needed a list; knowing only key names wasn't
+    enough to get the shape right.
+    """
+    assertion = "len(structured['user_feedback']) >= 3"
+    node = _node(pass_condition=PassCondition(assertions=[assertion], semantic_check="ok?"))
+    llm = _CapturingLLM()
+    Executor(llm).run(node)
+    assert assertion in llm.last_prompt
+
+
 def test_executor_forbids_nesting_required_keys_under_a_wrapper():
     """Regression: seen live -- the model produced
     {"feasibility_analysis": {"feature_1": ..., "total_estimated_time": ...}}
