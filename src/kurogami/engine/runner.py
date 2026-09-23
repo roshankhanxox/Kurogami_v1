@@ -17,6 +17,7 @@ from kurogami.contracts import (
     InterruptPort,
     NodeResult,
     NodeSpec,
+    NodeStatus,
     TraceRecord,
     TraceSink,
     TreeSnapshot,
@@ -99,7 +100,7 @@ class Runner:
         for planned in blueprint:
             self._record_created(planned)
         store.seed_blueprint(blueprint)
-        gave_up: list[str] = []
+        gave_up: dict[str, str] = {}
 
         while store.has_pending() and self._budget.ok():
             node = scheduler.next(store)
@@ -153,7 +154,7 @@ class Runner:
                 if blamed_id == node.node_id and not self._budget.record_node_retry(node.node_id):
                     # Out of its own retries: it stays FAILED and the rest of the tree
                     # keeps running (seen live: one node burned the whole run).
-                    gave_up.append(f"{node.node_id} ({verdict.reason.summary})")
+                    gave_up[node.node_id] = verdict.reason.summary
                 else:
                     event = backtrack.apply(store, node.node_id, verdict.reason)
                     backtrack_target = event.target_node_id
@@ -207,12 +208,19 @@ class Runner:
             )
 
         incomplete_reason: str | None = None
-        if self._budget.ok() and (gave_up or store.has_pending()):
+        # Judged from the final store: a node that gave up but was later regenerated
+        # by an ancestor's backtrack (and passed) must not mark the run incomplete.
+        still_failed = [
+            f"{node_id} ({summary})"
+            for node_id, summary in gave_up.items()
+            if store.status(node_id) == NodeStatus.FAILED
+        ]
+        if self._budget.ok() and (still_failed or store.has_pending()):
             blocked = store.pending_ids()
             for pending_id in blocked:
                 store.mark_skipped(pending_id)
             incomplete_reason = (
-                f"gave up on {', '.join(gave_up) or 'no node'}; "
+                f"gave up on {', '.join(still_failed) or 'no node'}; "
                 f"{len(blocked)} node(s) depending on it could not run"
             )
             seq += 1

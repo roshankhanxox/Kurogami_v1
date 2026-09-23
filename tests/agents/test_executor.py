@@ -182,3 +182,19 @@ def test_executor_finds_keys_read_through_get_and_membership():
     assert Executor._required_structured_keys(assertions) == [
         "competitors", "budget_limit", "timeline", "risks", "tiers",
     ]
+
+
+def test_only_the_iterated_key_list_counts_as_required_keys():
+    """A value list elsewhere in the assertion must not become 'required keys'."""
+    assertions = [
+        "all(k in structured for k in ['tier']) and structured['tier'] in ['low', 'high']"
+    ]
+    assert Executor._required_structured_keys(assertions) == ["tier"]
+
+
+def test_assertions_without_keys_are_shown_without_an_empty_key_list():
+    node = _node(pass_condition=PassCondition(assertions=["len(context) >= 0"], semantic_check="?"))
+    llm = _CapturingLLM()
+    Executor(llm).run(node)
+    assert "len(context) >= 0" in llm.last_prompt
+    assert "exactly these keys" not in llm.last_prompt

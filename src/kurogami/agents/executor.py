@@ -81,13 +81,16 @@ class Executor:
         assertions = node.pass_condition.assertions
         required_keys = self._required_structured_keys(assertions)
         key_rules = ""
-        if assertions:
+        checks = "\n".join(f"- {a}" for a in assertions)
+        if required_keys:
             key_rules = _render(
                 "execute_keys",
                 keys=", ".join(required_keys),
-                checks="\n".join(f"- {a}" for a in assertions),
+                checks=checks,
                 example=json.dumps(dict.fromkeys(required_keys, "..."), indent=2),
             )
+        elif assertions:
+            key_rules = _render("execute_checks", checks=checks)
         # Always asked for, so any node can report an unplanned prerequisite
         # (the only trigger for runtime gap-filling -- see agents/planner.py).
         parts.append(_render("execute_structured", key_rules=key_rules))
@@ -131,9 +134,14 @@ class Executor:
                 ) and any(_is_structured(c) for c in node.comparators):
                     add(_constant(node.left))
                     if isinstance(node.left, ast.Name):  # `k in structured for k in [...]`
-                        for literal in ast.walk(tree):
-                            if isinstance(literal, ast.List | ast.Tuple):
-                                for element in literal.elts:
+                        for gen in ast.walk(tree):
+                            if (
+                                isinstance(gen, ast.comprehension)
+                                and isinstance(gen.target, ast.Name)
+                                and gen.target.id == node.left.id
+                                and isinstance(gen.iter, ast.List | ast.Tuple)
+                            ):
+                                for element in gen.iter.elts:
                                     add(_constant(element))
         return keys
 

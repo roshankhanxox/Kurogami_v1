@@ -412,3 +412,33 @@ def test_a_self_failing_node_gives_up_without_spending_the_backtrack_budget():
     assert budget.state.node_retries["a"] == 3  # 1 attempt + max_node_retries (2) retries
     assert report.budget_breached is False
     assert report.incomplete_reason is not None and "gave up on a" in report.incomplete_reason
+
+
+def test_a_node_that_gave_up_but_was_later_regenerated_does_not_mark_the_run_incomplete():
+    """b gives up (3 self-FAILs); then c blames a, so a is backtracked and b is rebuilt
+    as b~r1, which passes. The run finished, so it must not report 'incomplete'."""
+
+    class _Scripted:
+        def __init__(self) -> None:
+            self.c_failed = False
+
+        def check(self, node, result, context):
+            if node.node_id == "b":
+                return Verdict(node_id="b", verdict="FAIL", checked_by="llm",
+                               reason=FailureReason(summary="bad b", violated="semantic", evidence="x"))
+            if node.node_id == "x" and not self.c_failed:
+                self.c_failed = True
+                return Verdict(node_id="x", verdict="FAIL", checked_by="llm",
+                               reason=FailureReason(summary="blame a", violated="semantic",
+                                                    evidence="x", suspect_node_ids=["a"]))
+            return Verdict(node_id=node.node_id, verdict="PASS", checked_by="llm")
+
+    class _Planner(_BlueprintPlanner):
+        def plan(self, goal):
+            return [_spec("a", [], 0), _spec("b", ["a"], 1), _spec("x", ["a"], 1)]
+
+    report = _runner(_Planner(), verifier=_Scripted()).run("goal")
+
+    assert report.snapshot.statuses["b"] == NodeStatus.INVALIDATED
+    assert report.snapshot.statuses["b~r1"] == NodeStatus.PASSED
+    assert report.incomplete_reason is None

@@ -133,7 +133,7 @@ class Planner:
         if filled.node_id in self._issued_ids:
             _log.warning("gap-fill reused existing id %s; dropped", filled.node_id)
             return []
-        if node.node_id not in filled.pass_condition.semantic_check:
+        if not _names(filled.pass_condition.semantic_check, node.node_id):
             _log.warning("gap-fill %s does not name its reporter; dropped", filled.node_id)
             return []
 
