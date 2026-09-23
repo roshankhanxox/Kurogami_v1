@@ -109,6 +109,25 @@ def test_executor_asks_for_the_keys_its_own_assertions_reference():
     assert "```json" in llm.last_prompt
 
 
+def test_executor_forbids_nesting_required_keys_under_a_wrapper():
+    """Regression: seen live -- the model produced
+    {"feasibility_analysis": {"feature_1": ..., "total_estimated_time": ...}}
+    instead of putting the required keys at the top level, so a flat
+    structured[...] assertion still raised KeyError.
+    """
+    node = _node(
+        pass_condition=PassCondition(
+            assertions=["structured['total_estimated_time'] is not None"],
+            semantic_check="ok?",
+        )
+    )
+    llm = _CapturingLLM()
+    Executor(llm).run(node)
+
+    assert "TOP level" in llm.last_prompt
+    assert "do not nest" in llm.last_prompt
+
+
 def test_executor_adds_no_json_instruction_when_there_are_no_assertions():
     llm = _CapturingLLM()
     Executor(llm).run(_node())

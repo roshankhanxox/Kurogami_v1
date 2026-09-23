@@ -72,8 +72,10 @@ class Executor:
         if required_keys:
             keys_list = ", ".join(required_keys)
             parts.append(
-                "\nEnd your response with a fenced JSON code block containing exactly "
-                f"these keys: {keys_list}. Example:\n```json\n"
+                "\nEnd your response with a fenced JSON code block. It must contain "
+                f"exactly these keys: {keys_list}. Every one of these keys must appear "
+                "at the TOP level of the JSON object -- do not nest them inside a "
+                "wrapper key or any other object. Example:\n```json\n"
                 + json.dumps(dict.fromkeys(required_keys, "..."), indent=2)
                 + "\n```"
             )
