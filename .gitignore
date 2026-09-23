@@ -16,3 +16,5 @@ traces/
 .pytest_cache/
 
 .DS_Store
+
+docs/
