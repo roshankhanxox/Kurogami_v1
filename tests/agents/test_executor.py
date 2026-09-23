@@ -167,3 +167,18 @@ def test_executor_prompt_version_differs_for_different_prompts():
     r1 = Executor(llm).run(_node(generated_prompt="prompt one"))
     r2 = Executor(llm).run(_node(generated_prompt="prompt two"))
     assert r1.prompt_version != r2.prompt_version
+
+
+def test_executor_finds_keys_read_through_get_and_membership():
+    """Live incident: once `.get` was allowed, a subscript-only regex missed
+    `structured.get('competitors')`, the model was never told the key, named it
+    `tools`, and all three live runs failed on it."""
+    assertions = [
+        "isinstance(structured.get('competitors'), list)",
+        "all(key in structured for key in ['budget_limit', 'timeline'])",
+        "'risks' in structured",
+        "len(structured['tiers']) >= 2",
+    ]
+    assert Executor._required_structured_keys(assertions) == [
+        "competitors", "budget_limit", "timeline", "risks", "tiers",
+    ]
