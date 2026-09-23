@@ -1,5 +1,8 @@
 """Deterministic, offline LLMPort implementation. No network, ever."""
 
+import json
+from typing import Any
+
 from pydantic import BaseModel
 
 from kurogami.contracts.ports import LLMResponse
@@ -15,13 +18,19 @@ class FakeLLM:
     Registered by prompt *name* (not full prompt text), so callers can key
     responses to `prompts/<name>.md` regardless of how context is interpolated
     into the final prompt string.
+
+    A canned response is a BaseModel instance, a plain str, or -- when a
+    schema is passed to complete() -- a plain dict/list that gets validated
+    against that schema. The dict/list form exists so a scripted conversation
+    can be authored as plain JSON (e.g. from a CLI --fake-script file)
+    without importing kurogami's pydantic models to build instances by hand.
     """
 
-    def __init__(self, responses: dict[str, BaseModel | str]) -> None:
+    def __init__(self, responses: dict[str, BaseModel | str | dict[str, Any] | list[Any]]) -> None:
         self._responses = responses
         self._model_id = "fake-llm"
 
-    def register(self, prompt_name: str, response: BaseModel | str) -> None:
+    def register(self, prompt_name: str, response: BaseModel | str | dict[str, Any] | list[Any]) -> None:
         self._responses[prompt_name] = response
 
     def complete(
@@ -42,16 +51,27 @@ class FakeLLM:
         canned = self._responses[key]
 
         if schema is not None:
-            if not isinstance(canned, schema):
+            validated: BaseModel
+            if isinstance(canned, schema):
+                validated = canned
+            elif isinstance(canned, dict | list):
+                validated = schema.model_validate(canned)
+            else:
                 raise TypeError(
                     f"FakeLLM response for {key!r} is {type(canned).__name__}, "
-                    f"expected {schema.__name__}"
+                    f"expected {schema.__name__} or a dict/list to validate against it"
                 )
+            text = validated.model_dump_json()
+            parsed: BaseModel | None = validated
+        elif isinstance(canned, BaseModel):
             text = canned.model_dump_json()
-            parsed: BaseModel | None = canned
+            parsed = canned
+        elif isinstance(canned, dict | list):
+            text = json.dumps(canned)
+            parsed = None
         else:
-            text = canned if isinstance(canned, str) else canned.model_dump_json()
-            parsed = canned if isinstance(canned, BaseModel) else None
+            text = canned
+            parsed = None
 
         return LLMResponse(
             text=text,
