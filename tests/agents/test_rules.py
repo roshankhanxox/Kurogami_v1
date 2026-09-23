@@ -84,6 +84,35 @@ def test_generator_expression_can_still_fail_on_real_data():
     assert verdict.verdict == "FAIL"
 
 
+def test_whitelisted_name_used_inside_a_generator_body_resolves():
+    """Latent bug: a generator's body can't see eval()'s locals, so `len`
+    inside `all(len(x) > 0 for x in ...)` raised an uncaught NameError.
+    """
+    node = _node(["all(len(x) > 0 for x in structured['names'])"])
+    result = _result({"names": ["a", "bb"]})
+    verdict = RuleChecker().check(node, result)
+    assert verdict.verdict == "PASS"
+
+
+def test_safe_builtins_are_permitted():
+    node = _node([
+        "sum(structured['prices']) > 0",
+        "max(structured['prices']) <= 1000",
+        "isinstance(structured['prices'], list)",
+        "int(structured['count']) == 3",
+    ])
+    result = _result({"prices": [100, 500], "count": "3"})
+    verdict = RuleChecker().check(node, result)
+    assert verdict.verdict == "PASS"
+
+
+def test_method_calls_are_still_rejected():
+    node = _node(["structured.get('x') is None"])
+    verdict = RuleChecker().check(node, _result({}))
+    assert verdict.verdict == "FAIL"
+    assert verdict.reason.violated == "schema"
+
+
 def test_list_comprehension_is_permitted_syntax():
     node = _node(["len([x for x in structured['tiers'] if x > 100]) >= 1"])
     result = _result({"tiers": [50, 150, 300]})

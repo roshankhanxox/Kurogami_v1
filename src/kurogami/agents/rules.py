@@ -13,8 +13,31 @@ from typing import Any, Literal
 
 from kurogami.contracts import FailureReason, NodeResult, NodeSpec, Verdict
 
-_ALLOWED_NAMES = frozenset({"structured", "context", "len", "any", "all"})
-_ALLOWED_CALL_NAMES = frozenset({"len", "any", "all"})
+# Pure, side-effect-free builtins only. The type names are here so isinstance()
+# can be used; nothing that imports, opens, reflects, or allocates unboundedly.
+_SAFE_BUILTINS: dict[str, Any] = {
+    "len": len,
+    "any": any,
+    "all": all,
+    "sum": sum,
+    "min": min,
+    "max": max,
+    "abs": abs,
+    "round": round,
+    "sorted": sorted,
+    "set": set,
+    "str": str,
+    "int": int,
+    "float": float,
+    "bool": bool,
+    "list": list,
+    "dict": dict,
+    "tuple": tuple,
+    "isinstance": isinstance,
+}
+ALLOWED_FUNCTIONS = tuple(_SAFE_BUILTINS)
+_ALLOWED_NAMES = frozenset({"structured", "context", *_SAFE_BUILTINS})
+_ALLOWED_CALL_NAMES = frozenset(_SAFE_BUILTINS)
 
 _ALLOWED_NODE_TYPES = (
     ast.Expression,
@@ -87,22 +110,28 @@ def _validate(tree: ast.AST) -> None:
         if isinstance(node, ast.Call) and (
             not isinstance(node.func, ast.Name) or node.func.id not in _ALLOWED_CALL_NAMES
         ):
-            raise UnsafeAssertionError("assertion calls a disallowed function")
+            func = node.func.id if isinstance(node.func, ast.Name) else type(node.func).__name__
+            raise UnsafeAssertionError(f"assertion calls a disallowed function: {func}")
+
+
+def validate_assertion(expression: str) -> None:
+    """Raise UnsafeAssertionError or SyntaxError if this assertion could never be evaluated."""
+    _validate(ast.parse(expression, mode="eval"))
 
 
 def _safe_eval(expression: str, structured: dict[str, Any], context: dict[str, str]) -> bool:
     tree = ast.parse(expression, mode="eval")
     _validate(tree)
     compiled = compile(tree, filename="<pass_condition.assertion>", mode="eval")
-    safe_globals: dict[str, Any] = {"__builtins__": {}}
-    safe_locals: dict[str, Any] = {
+    # Comprehensions run in their own scope and only see globals, so the
+    # whitelisted names live in globals (with __builtins__ still emptied).
+    safe_globals: dict[str, Any] = {
+        "__builtins__": {},
         "structured": structured,
         "context": context,
-        "len": len,
-        "any": any,
-        "all": all,
+        **_SAFE_BUILTINS,
     }
-    return bool(eval(compiled, safe_globals, safe_locals))
+    return bool(eval(compiled, safe_globals))
 
 
 class RuleChecker:
@@ -124,7 +153,9 @@ class RuleChecker:
                     node, "assertion", f"assertion raised {type(exc).__name__}: {exc}", assertion
                 )
             if not passed:
-                return self._fail(node, "assertion", "a deterministic assertion failed", assertion)
+                return self._fail(
+                    node, "assertion", f"assertion evaluated to False: {assertion}", assertion
+                )
         return Verdict(node_id=node.node_id, verdict="PASS", checked_by="rules")
 
     @staticmethod
