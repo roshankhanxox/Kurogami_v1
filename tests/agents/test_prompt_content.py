@@ -15,8 +15,13 @@ def _normalized(name: str) -> str:
 def test_scope_prompt_bounds_the_investigation_and_forces_a_single_decision():
     content = _normalized("scope")
     assert "{min_items}" in content and "{max_items}" in content
-    assert 'Exactly one item -- the final recommendation' in content
-    assert "{min_levels}" in content and "{max_levels}" in content
+    assert "The last stage has exactly one item: the final recommendation" in content
+    assert "Use exactly {stages} stages" in content
+
+
+def test_scope_prompt_makes_dependencies_point_to_earlier_stages():
+    """Live incident: the model couldn't count chain length, so depth is bounded by stages."""
+    assert "They must all be in EARLIER stages" in _normalized("scope")
 
 
 def test_scope_prompt_surfaces_hard_limits_later_items_must_respect():

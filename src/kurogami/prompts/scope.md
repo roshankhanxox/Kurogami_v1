@@ -7,25 +7,34 @@ be padding, so it must be tight.
 Goal:
 {goal_json}
 
+Organise the questions into numbered stages, like the phases of a real
+investigation: stage 1 is what can be researched from scratch, each later stage
+builds on answers from earlier stages, and the last stage is the final decision.
+
 Rules, all mandatory:
 
-1. Write between {min_items} and {max_items} items.
-2. Each item has:
+1. Write between {min_items} and {max_items} items in total.
+2. Use exactly {stages} stages, numbered 1 to {stages}, with this shape:
+   - stage 1: two or three starting points that can be researched from scratch;
+   - every stage from 2 to {penultimate}: exactly two items, and each of them
+     depends on at least one item from the stage just before it;
+   - stage {stages}: The last stage has exactly one item: the final
+     recommendation that answers the goal.
+3. Each item has:
    - id: a short, unique snake_case id.
    - question: one specific question a focused analyst could answer.
-   - kind: one of research, analysis, synthesis, decision.
-   - depends_on: the ids of the items whose answers this one needs, or an
-     empty list for a starting point.
-3. Exactly one item -- the final recommendation that answers the goal -- has
-   kind "decision", and no item depends on it. Every other item must feed into
-   it, directly or through other items.
-4. Build depth, not breadth: most items should depend on an earlier item's
-   answer. The longest chain of dependencies, from a starting point to the
-   final decision, must contain between {min_levels} and {max_levels} items.
-5. When an early answer sets a hard limit that later answers must respect --
-   a budget, the most customers will pay, a regulation, a capacity -- say so
-   in that item's question, and make every later item that must respect the
-   limit depend on it.
+   - kind: one of research, analysis, synthesis, decision. Only the final item
+     has kind "decision".
+   - stage: its stage number.
+   - depends_on: the ids of the items whose answers this one needs. They must
+     all be in EARLIER stages. Stage 1 items depend on nothing.
+4. Every item from stage 2 on depends on at least one item from the stage just
+   before it. The final item depends on every item that nothing else uses, so
+   every answer feeds the decision.
+5. When an early answer sets a hard limit that later answers must respect -- a
+   budget, the most customers will pay, a regulation, a capacity -- say so in
+   that item's question, and make every later item that must respect the limit
+   depend on it.
 6. No item may merely refine, re-check or re-analyse another item's question.
 
 Return only the list of items.

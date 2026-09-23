@@ -213,7 +213,7 @@ class Runner:
         for gap in self._planner.expand(node, result, goal):
             try:
                 added = store.add_gap_node(
-                    gap, node.node_id, max_depth=self._budget.limits.max_depth - 1
+                    gap, node.node_id, max_depth=self._budget.limits.max_depth
                 )
             except DuplicateNodeError:
                 added = False

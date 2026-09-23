@@ -30,19 +30,32 @@ _log = logging.getLogger(__name__)
 MIN_SCOPE_ITEMS = 10
 MAX_SCOPE_ITEMS = 14
 MIN_TREE_DEPTH = 4
+# Seen live: gpt-4o-mini handled ranges ("5-7 stages") poorly -- it swung between one
+# long chain and a flat plan -- but follows a concrete shape. 6 stages at two items per
+# middle stage gives 11-12 nodes at depth 5: inside G3 (depth >= 4, >= 10 nodes) and
+# inside the max_depth=6 budget.
+SCOPE_STAGES = 6
+MAX_CORRECTIONS = 2
+MIN_PROMPT_WORDS = 40
 MISSING_PREREQUISITES_KEY = "missing_prerequisites"
 
 _Model = TypeVar("_Model", bound=BaseModel)
 
 
 class BlueprintError(RuntimeError):
-    """The Master could not produce a valid plan, even after one correction."""
+    """The Master could not produce a valid plan, even after its bounded corrections."""
 
 
 class _ScopeItem(BaseModel):
+    """stage: seen live, gpt-4o-mini could not count a dependency chain's length, but
+    it can label stages. Dependencies may only point to earlier stages, so the
+    depth limit holds by construction and every rule is checkable per item.
+    """
+
     id: str
     question: str
     kind: NodeKind
+    stage: int
     depends_on: list[str]
 
 
@@ -132,16 +145,20 @@ class Planner:
             goal_json=goal.model_dump_json(indent=2),
             min_items=MIN_SCOPE_ITEMS,
             max_items=MAX_SCOPE_ITEMS,
-            min_levels=MIN_TREE_DEPTH + 1,
-            max_levels=self._max_depth,
+            stages=SCOPE_STAGES,
+            penultimate=SCOPE_STAGES - 1,
         )
         scope = self._ask(prompt, _Scope).items
         problems = _scope_problems(scope, self._max_depth)
-        if problems:
+        for _ in range(MAX_CORRECTIONS):
+            if not problems:
+                return scope
             scope = self._ask(prompt + _correction(problems), _Scope).items
             problems = _scope_problems(scope, self._max_depth)
-            if problems:
-                raise BlueprintError("scope still invalid after correction: " + "; ".join(problems))
+        if problems:
+            raise BlueprintError(
+                f"scope still invalid after {MAX_CORRECTIONS} corrections: " + "; ".join(problems)
+            )
         return scope
 
     def _write_blueprint(self, goal: GoalSpec, scope: list[_ScopeItem]) -> list[NodeSpec]:
@@ -151,15 +168,30 @@ class Planner:
             allowed_functions=", ".join(ALLOWED_FUNCTIONS),
         )
         blueprint = self._ask(prompt, _Blueprint).nodes
-        problems = _blueprint_problems(blueprint, scope)
-        if problems:
-            blueprint = self._ask(prompt + _correction(problems), _Blueprint).nodes
-            # Unevaluable assertions can be dropped; structural problems cannot.
-            problems = _blueprint_problems(blueprint, scope, check_assertions=False)
-            if problems:
-                raise BlueprintError(
-                    "blueprint still invalid after correction: " + "; ".join(problems)
-                )
+        for _ in range(MAX_CORRECTIONS):
+            problems = _blueprint_problems(blueprint, scope)
+            if not problems:
+                break
+            # Seen live: re-asking for the whole blueprint made the model rewrite the
+            # nodes it had just fixed, and they regressed. Keep what passed; re-ask
+            # only for the failing nodes and merge them back in.
+            failing = sorted({node_id for node_id, _ in problems})
+            note = load_prompt("correct_nodes").format(
+                problems="\n".join(f"- {message}" for _, message in problems),
+                node_ids=", ".join(failing),
+                allowed_functions=", ".join(ALLOWED_FUNCTIONS),
+            )
+            fixed = {n.node_id: n for n in self._ask(prompt + note, _Blueprint).nodes}
+            kept = [n for n in blueprint if n.node_id not in failing]
+            blueprint = kept + [fixed[i] for i in failing if i in fixed and i in _ids(scope)]
+        # Unevaluable assertions left after the corrections are dropped (and logged);
+        # structural problems cannot be.
+        structural = _blueprint_problems(blueprint, scope, check_assertions=False)
+        if structural:
+            raise BlueprintError(
+                f"blueprint still invalid after {MAX_CORRECTIONS} corrections: "
+                + "; ".join(message for _, message in structural)
+            )
         return _assemble(scope, blueprint)
 
     def _ask(self, prompt: str, schema: type[_Model]) -> _Model:
@@ -167,6 +199,10 @@ class Planner:
         if not isinstance(parsed, schema):
             raise TypeError(f"Planner expected a parsed {schema.__name__}, got {type(parsed).__name__}")
         return parsed
+
+
+def _ids(scope: list[_ScopeItem]) -> set[str]:
+    return {item.id for item in scope}
 
 
 def _scope_json(scope: list[_ScopeItem]) -> str:
@@ -234,6 +270,33 @@ def _scope_problems(scope: list[_ScopeItem], max_depth: int) -> list[str]:
     if problems:
         return problems
 
+    stages = {item.id: item.stage for item in scope}
+    last_stage = max(stages.values())
+    for item in scope:
+        if not 1 <= item.stage <= max_depth + 1:
+            problems.append(f"{item.id} is in stage {item.stage}; stages run 1-{max_depth + 1}")
+        for d in item.depends_on:
+            if stages[d] >= item.stage:
+                problems.append(
+                    f"{item.id} (stage {item.stage}) depends on {d} (stage {stages[d]}); "
+                    f"an item may only depend on items in an earlier stage"
+                )
+    used = sorted(set(stages.values()))
+    if used != list(range(1, last_stage + 1)):
+        problems.append(f"stages must be numbered 1, 2, 3, ... with none skipped; used {used}")
+    if last_stage < MIN_TREE_DEPTH + 1:
+        problems.append(
+            f"only {last_stage} stages used; use at least {MIN_TREE_DEPTH + 1}, with most "
+            f"items depending on an answer from the stage before"
+        )
+    finals = [i.id for i in scope if i.stage == last_stage]
+    if len(finals) != 1:
+        problems.append(
+            f"the last stage ({last_stage}) must contain only the final decision; it has {finals}"
+        )
+    if problems:
+        return problems
+
     order = _topological_order(deps)
     if order is None:
         return ["the dependencies contain a cycle"]
@@ -251,47 +314,82 @@ def _scope_problems(scope: list[_ScopeItem], max_depth: int) -> list[str]:
     if len(decisions) != 1:
         problems.append(f"exactly one item may have kind 'decision'; found {decisions}")
 
-    deepest = max(_depths(order, deps).values())
-    if not MIN_TREE_DEPTH <= deepest <= max_depth - 1:
+    # Stages bound depth from above by construction; this catches the other side --
+    # stages used, but no item actually builds on the stage before.
+    chain = _longest_chain(order, deps)
+    if len(chain) < MIN_TREE_DEPTH + 1:
         problems.append(
-            f"the longest dependency chain has {deepest + 1} items; it must have "
-            f"{MIN_TREE_DEPTH + 1}-{max_depth}"
+            f"the longest dependency chain is {' -> '.join(chain)} ({len(chain)} items); at "
+            f"least one chain must have {MIN_TREE_DEPTH + 1} -- make items depend on an "
+            f"answer from the stage just before theirs"
         )
     return problems
 
 
+def _longest_chain(order: list[str], deps: dict[str, list[str]]) -> list[str]:
+    depth = _depths(order, deps)
+    node = max(order, key=lambda n: depth[n])
+    chain = [node]
+    while deps[node]:
+        node = max(deps[node], key=lambda p: depth[p])
+        chain.append(node)
+    return list(reversed(chain))
+
+
 def _blueprint_problems(
     blueprint: list[_BlueprintNode], scope: list[_ScopeItem], *, check_assertions: bool = True
-) -> list[str]:
-    problems: list[str] = []
+) -> list[tuple[str, str]]:
+    """(node_id, message) pairs, so a correction can target just the failing nodes."""
+    problems: list[tuple[str, str]] = []
     scope_ids = {item.id for item in scope}
     written = [n.node_id for n in blueprint]
-    missing = sorted(scope_ids - set(written))
-    extra = sorted(set(written) - scope_ids)
-    if missing:
-        problems.append(f"no node written for scope items {missing}")
-    if extra:
-        problems.append(f"nodes not in the scope: {extra}")
-    duplicates = sorted({i for i in written if written.count(i) > 1})
-    if duplicates:
-        problems.append(f"more than one node for {duplicates}")
+    for missing in sorted(scope_ids - set(written)):
+        problems.append((missing, f"{missing}: no node was written for this scope item"))
+    for extra in sorted(set(written) - scope_ids):
+        problems.append((extra, f"{extra}: not a scope item -- remove it"))
+    for dup in sorted({i for i in written if written.count(i) > 1}):
+        problems.append((dup, f"{dup}: more than one node was written"))
 
     deps = {item.id: item.depends_on for item in scope}
     for node in blueprint:
         if node.node_id not in deps:
             continue
         ancestors = _ancestors(node.node_id, deps)
-        if ancestors and not any(a in node.pass_condition.semantic_check for a in ancestors):
-            problems.append(
-                f"{node.node_id}: semantic_check must name one of its ancestor ids "
-                f"verbatim ({sorted(ancestors)})"
+        check = node.pass_condition.semantic_check
+        words = len(node.generated_prompt.split())
+        if words < MIN_PROMPT_WORDS:
+            # Gate G3 wants substantive self-written prompts; seen live, some ran to 35.
+            message = (
+                f"{node.node_id}: generated_prompt has {words} words; write at least "
+                f"{MIN_PROMPT_WORDS}, specific to this goal"
             )
+            problems.append((node.node_id, message))
+        if ancestors and not any(_names(check, a) for a in ancestors):
+            message = (
+                f"{node.node_id}: semantic_check must name one of its ancestor ids, "
+                f"e.g. {min(ancestors)} (any of {sorted(ancestors)})"
+            )
+            problems.append((node.node_id, message))
         if check_assertions:
             for assertion in node.pass_condition.assertions:
                 error = _assertion_error(assertion)
                 if error is not None:
-                    problems.append(f"{node.node_id}: assertion `{assertion}` -> {error}")
+                    problems.append(
+                        (node.node_id, f"{node.node_id}: assertion `{assertion}` -> {error}")
+                    )
     return problems
+
+
+def _names(text: str, node_id: str) -> bool:
+    """Whether a check names this node: its id, or the id read as words.
+
+    Seen live, the model writes "the identified marketing channels" for
+    marketing_channels -- the verifier sees context keyed by that id, so the
+    reference is unambiguous. Vaguer paraphrases ("market size" for
+    target_market_size) still don't count.
+    """
+    lowered = text.lower()
+    return node_id.lower() in lowered or node_id.replace("_", " ").lower() in lowered
 
 
 def _assemble(scope: list[_ScopeItem], blueprint: list[_BlueprintNode]) -> list[NodeSpec]:

@@ -49,10 +49,15 @@ def _goal_dict() -> dict:
     }
 
 
+def _stage(shape: dict, i: str, seen: frozenset = frozenset()) -> int:
+    deps = [d for d in shape[i][1] if d in shape and d not in seen]
+    return 1 + max((_stage(shape, d, seen | {i}) for d in deps), default=0)
+
+
 def _scope(shape: dict = _SHAPE) -> dict:
     return {
         "items": [
-            {"id": i, "question": f"{i}?", "kind": kind, "depends_on": deps}
+            {"id": i, "question": f"{i}?", "kind": kind, "stage": _stage(shape, i), "depends_on": deps}
             for i, (kind, deps) in shape.items()
         ]
     }
@@ -66,7 +71,7 @@ def _blueprint(assertions: dict[str, list[str]] | None = None) -> dict:
                 "node_id": i,
                 "title": i,
                 "node_goal": f"goal {i}",
-                "generated_prompt": f"prompt for {i} " * 10,
+                "generated_prompt": f"prompt for {i} " * 15,
                 "pass_condition": {
                     "assertions": assertions.get(i, []),
                     "semantic_check": f"Consistent with {deps[0]}?" if deps else "Answered?",
