@@ -1,0 +1,87 @@
+"""Executor: sends generated_prompt + context to the LLM; SearchPort only for RESEARCH."""
+
+from kurogami.adapters.search.fake import FakeSearch
+from kurogami.agents.executor import Executor
+from kurogami.contracts import LLMResponse, NodeKind, NodeSpec, PassCondition, SearchHit
+
+
+class _CapturingLLM:
+    """Records the last prompt it was sent; returns a fixed canned response."""
+
+    def __init__(self, text: str = "{}") -> None:
+        self.last_prompt: str | None = None
+        self._text = text
+
+    def complete(self, *, prompt, system=None, schema=None, temperature=0.0):
+        self.last_prompt = prompt
+        return LLMResponse(text=self._text, tokens_in=10, tokens_out=10, latency_ms=1, model_id="fake")
+
+
+def _node(**overrides) -> NodeSpec:
+    kwargs = {
+        "node_id": "n_001",
+        "parent_ids": [],
+        "depth": 0,
+        "kind": NodeKind.ANALYSIS,
+        "title": "title",
+        "node_goal": "goal",
+        "generated_prompt": "do the analysis",
+        "pass_condition": PassCondition(assertions=[], semantic_check="ok?"),
+    }
+    kwargs.update(overrides)
+    return NodeSpec(**kwargs)
+
+
+def test_executor_sends_the_generated_prompt():
+    llm = _CapturingLLM()
+    Executor(llm).run(_node())
+    assert llm.last_prompt.startswith("do the analysis")
+
+
+def test_executor_includes_ancestor_context():
+    llm = _CapturingLLM()
+    Executor(llm).run(_node(context={"n_000": "market sizing output"}))
+    assert "market sizing output" in llm.last_prompt
+
+
+def test_executor_includes_injected_constraints():
+    llm = _CapturingLLM()
+    Executor(llm).run(_node(injected_constraints=["Stay under INR 500/month."]))
+    assert "Stay under INR 500/month." in llm.last_prompt
+
+
+def test_executor_calls_search_only_for_research_nodes():
+    search = FakeSearch(hits=[SearchHit(title="T", url="https://x.invalid", snippet="S")])
+    llm = _CapturingLLM()
+
+    Executor(llm, search=search).run(_node(kind=NodeKind.ANALYSIS))
+    assert "Search results" not in llm.last_prompt
+
+    Executor(llm, search=search).run(_node(kind=NodeKind.RESEARCH))
+    assert "Search results" in llm.last_prompt
+    assert "T" in llm.last_prompt
+
+
+def test_executor_parses_json_output_into_structured():
+    result = Executor(_CapturingLLM(text='{"wtp_ceiling_inr": 500}')).run(_node())
+    assert result.structured == {"wtp_ceiling_inr": 500}
+
+
+def test_executor_falls_back_to_empty_structured_on_non_json_output():
+    result = Executor(_CapturingLLM(text="not json at all")).run(_node())
+    assert result.structured == {}
+
+
+def test_executor_prompt_version_is_stable_for_an_identical_prompt():
+    llm = _CapturingLLM()
+    node = _node()
+    r1 = Executor(llm).run(node)
+    r2 = Executor(llm).run(node)
+    assert r1.prompt_version == r2.prompt_version
+
+
+def test_executor_prompt_version_differs_for_different_prompts():
+    llm = _CapturingLLM()
+    r1 = Executor(llm).run(_node(generated_prompt="prompt one"))
+    r2 = Executor(llm).run(_node(generated_prompt="prompt two"))
+    assert r1.prompt_version != r2.prompt_version
