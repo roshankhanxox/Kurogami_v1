@@ -30,8 +30,10 @@ Rules, all mandatory:
      evaluated literally against the node's own structured output -- never
      a natural-language sentence. Every expression may only reference the
      name `structured` (a dict), `context` (a dict), and the functions
-     `len`, `any`, `all`. Example, given a structured output with a
-     "competitors" list: "len(structured['competitors']) >= 3"
+     len, any, all, sum, min, max, abs, round, sorted, set, str, int, float,
+     bool, list, dict, tuple, isinstance. No attribute or method access (no
+     `.get`, `.lower`, `.keys`, etc.). Example, given a structured output
+     with a "competitors" list: "len(structured['competitors']) >= 3"
      A plain-English description such as "the output lists competitors" is
      not an assertion and will crash evaluation -- an empty list is fine if
      no cheap check applies, but never write English there.

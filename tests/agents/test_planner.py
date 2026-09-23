@@ -3,7 +3,14 @@
 from kurogami.adapters.llm.fake import FakeLLM
 from kurogami.agents._prompt_loader import load_prompt
 from kurogami.agents.planner import Planner, _NodeSpecBatch, _PlannerNodeSpec
-from kurogami.contracts import GoalSpec, NodeKind, NodeResult, NodeSpec, PassCondition
+from kurogami.contracts import (
+    GoalSpec,
+    LLMResponse,
+    NodeKind,
+    NodeResult,
+    NodeSpec,
+    PassCondition,
+)
 
 
 def _goal() -> GoalSpec:
@@ -108,3 +115,73 @@ def test_expand_can_return_zero_children_to_terminate_a_branch():
     llm = FakeLLM(responses={prompt: _NodeSpecBatch(nodes=[])})
 
     assert Planner(llm).expand(parent, result, goal) == []
+
+
+def _planner_node_with(node_id: str, assertions: list[str]) -> _PlannerNodeSpec:
+    kwargs = _node_kwargs(node_id)
+    kwargs["pass_condition"] = PassCondition(assertions=assertions, semantic_check="ok?")
+    return _PlannerNodeSpec(**kwargs)
+
+
+def test_plan_reasks_once_when_an_assertion_cannot_be_evaluated():
+    """Regression: seen live -- an assertion calling a non-whitelisted function
+    failed identically on every retry of its node until the budget broke,
+    because re-executing a node can't change its own assertion. The planner
+    now catches this at authoring time and asks the model to fix it.
+    """
+    goal = _goal()
+    bad = _planner_node_with("n_001", ["open('x')"])
+    good = _planner_node_with("n_001", ["len(structured['items']) >= 1"])
+    llm = _ScriptedLLM([_NodeSpecBatch(nodes=[bad]), _NodeSpecBatch(nodes=[good])])
+
+    [node] = Planner(llm).plan(goal)
+
+    assert node.pass_condition.assertions == ["len(structured['items']) >= 1"]
+    assert len(llm.prompts) == 2
+    retry_prompt = llm.prompts[1]
+    assert retry_prompt.startswith(llm.prompts[0])  # original prompt plus a correction
+    assert "open('x')" in retry_prompt
+    assert "cannot be evaluated" in retry_prompt
+
+
+def test_plan_drops_assertions_still_invalid_after_the_reask():
+    bad = _NodeSpecBatch(nodes=[_planner_node_with("n_001", ["open('x')", "len(structured['a']) > 0"])])
+    llm = _ScriptedLLM([bad, bad])
+
+    [node] = Planner(llm).plan(_goal())
+
+    assert node.pass_condition.assertions == ["len(structured['a']) > 0"]
+    assert len(llm.prompts) == 2  # original + exactly one corrective re-ask
+
+
+def test_plan_does_not_reask_when_all_assertions_are_valid():
+    good = _NodeSpecBatch(nodes=[_planner_node_with("n_001", ["len(structured['a']) > 0"])])
+    llm = _ScriptedLLM([good])
+    Planner(llm).plan(_goal())
+    assert len(llm.prompts) == 1
+
+
+def test_expand_also_validates_assertions():
+    bad = _NodeSpecBatch(nodes=[_planner_node_with("n_002", ["structured.keys()"])])
+    llm = _ScriptedLLM([bad, bad])
+
+    [child] = Planner(llm).expand(_node("n_001"), _result("n_001"), _goal())
+
+    assert child.pass_condition.assertions == []
+    assert len(llm.prompts) == 2
+
+
+class _ScriptedLLM:
+    """Returns the given parsed batches in order, one per call; records every prompt."""
+
+    def __init__(self, batches: list[_NodeSpecBatch]) -> None:
+        self._batches = list(batches)
+        self.prompts: list[str] = []
+
+    def complete(self, *, prompt, system=None, schema=None, temperature=0.0):
+        self.prompts.append(prompt)
+        batch = self._batches.pop(0)
+        return LLMResponse(
+            text=batch.model_dump_json(), parsed=batch,
+            tokens_in=1, tokens_out=1, latency_ms=0, model_id="fake",
+        )
