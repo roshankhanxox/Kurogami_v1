@@ -28,6 +28,24 @@ For every item, write a node with:
   `.append`, etc.). Example, for a structured output with a "competitors" list:
   "len(structured['competitors']) >= 3". Use an empty list if no cheap check
   applies.
+  Checks that only test shape (a key exists, a list has 3 items) can never catch
+  a wrong answer, so every node also gets at least one check on a VALUE:
+  - A node that establishes a figure later nodes depend on (a limit, a size, a
+    price, a budget) reports it as a plain number under a descriptive key with
+    its unit, and checks it, e.g. "structured['max_monthly_price_inr'] > 0".
+  - A node that commits to a figure bounded by an ancestor's figure compares
+    them through the name `ancestors`: ancestors['<ancestor_id>']['<key>'] is
+    the value that ancestor reported. For example
+    "structured['monthly_price_inr'] <= ancestors['willingness_to_pay']['max_monthly_price_inr']".
+    The ancestor must be one this node depends on (directly or indirectly), and
+    the key must be one that ancestor's own assertions read -- otherwise that
+    ancestor will never report it.
+  Checks verify facts and consistency; they never make the node's decision for
+  it. Do not rule out an option the node is meant to weigh (for example "every
+  tier costs more than 0" forbids a free tier the pricing node might rightly
+  choose). Compare a figure only against a figure that bounds the same thing,
+  in the same unit -- never an ad-hoc multiple of an unrelated one (a total
+  budget is not bounded by "the monthly price times 1000").
 - pass_condition.semantic_check: one question a verifier will ask about the
   output. For any item that depends on other items, it must name at least one
   of its ancestor ids verbatim -- for example "Do the proposed tiers stay under
@@ -35,5 +53,8 @@ For every item, write a node with:
   as "is the output non-empty". Never ask for unbounded completeness ("all",
   "every", "comprehensive") -- no output can prove it. Set a bar it can visibly
   meet instead, e.g. "Does it name at least 4 competitors with their pricing?".
+  Ask about consistency and evidence, which a wrong answer would fail -- not
+  about whether the output "uses" or "considers" an ancestor, which any fluent
+  answer passes.
 
 Return the nodes, and nothing else.

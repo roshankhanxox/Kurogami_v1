@@ -239,3 +239,39 @@ def test_attribute_access_is_rejected():
 
     assert verdict.verdict == "FAIL"
     assert verdict.reason.violated == "schema"
+
+
+# --- cross-node assertions through `ancestors` ---------------------------------------
+
+_WTP_CONTEXT = {"n_003": 'Customers pay at most 500.\n```json\n{"max_price_inr": 500}\n```'}
+_PRICE_CHECK = "structured['price_inr'] <= ancestors['n_003']['max_price_inr']"
+
+
+def test_an_assertion_can_compare_against_an_ancestors_reported_value():
+    verdict = RuleChecker().check(_node([_PRICE_CHECK], _WTP_CONTEXT), _result({"price_inr": 399}))
+    assert verdict.verdict == "PASS"
+
+
+def test_breaking_an_ancestors_limit_fails_with_both_values_in_the_evidence():
+    verdict = RuleChecker().check(_node([_PRICE_CHECK], _WTP_CONTEXT), _result({"price_inr": 999}))
+    assert verdict.verdict == "FAIL"
+    assert verdict.reason.evidence.startswith(_PRICE_CHECK)
+    assert "ancestors['n_003']['max_price_inr'] = 500" in verdict.reason.evidence
+    assert "999" in verdict.reason.evidence
+    assert verdict.reason.suspect_node_ids == []  # blame is the localiser's call, not the rule's
+
+
+def test_a_missing_ancestor_is_a_typed_fail_not_a_crash():
+    verdict = RuleChecker().check(_node([_PRICE_CHECK], {}), _result({"price_inr": 1}))
+    assert verdict.verdict == "FAIL"
+    assert "KeyError" in verdict.reason.summary
+
+
+def test_a_type_error_names_the_offending_value_so_a_retry_can_fix_it():
+    """Live incident: three retries repeated a sentence where a number was needed."""
+    verdict = RuleChecker().check(
+        _node(["structured['late_payment_frequency'] >= 0"]),
+        _result({"late_payment_frequency": "High; late payments are common"}),
+    )
+    assert verdict.verdict == "FAIL"
+    assert "'late_payment_frequency' is a str" in verdict.reason.summary

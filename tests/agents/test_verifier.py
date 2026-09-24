@@ -50,7 +50,7 @@ def _prompt_for(node: NodeSpec, result: NodeResult, context: dict[str, str]) -> 
 def test_verifier_returns_pass_and_forces_checked_by_llm():
     node, result, context = _node(), _result(), {"n_001": "WTP ceiling: 500"}
     prompt = _prompt_for(node, result, context)
-    llm = FakeLLM(responses={prompt: _VerifyResponse(verdict="PASS")})
+    llm = FakeLLM(responses={prompt: _VerifyResponse(checked_claims=[], verdict="PASS")})
 
     verdict = Verifier(llm).check(node, result, context)
 
@@ -68,7 +68,7 @@ def test_verifier_returns_fail_with_suspect_node_ids():
         evidence="Tier 2: INR 2000/month.",
         suspect_node_ids=["n_002"],
     )
-    llm = FakeLLM(responses={prompt: _VerifyResponse(verdict="FAIL", reason=reason)})
+    llm = FakeLLM(responses={prompt: _VerifyResponse(checked_claims=[], verdict="FAIL", reason=reason)})
 
     verdict = Verifier(llm).check(node, result, context)
 
@@ -79,7 +79,7 @@ def test_verifier_returns_fail_with_suspect_node_ids():
 def test_verifier_rejects_a_fail_with_no_reason():
     node, result, context = _node(), _result(), {}
     prompt = _prompt_for(node, result, context)
-    llm = FakeLLM(responses={prompt: _VerifyResponse(verdict="FAIL", reason=None)})
+    llm = FakeLLM(responses={prompt: _VerifyResponse(checked_claims=[], verdict="FAIL", reason=None)})
 
     with pytest.raises(ValueError, match="no reason"):
         Verifier(llm).check(node, result, context)

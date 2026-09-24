@@ -365,3 +365,118 @@ def test_expand_drops_a_gap_node_that_does_not_name_its_reporter():
     planner, llm = _planned()
     llm._parsed.append(_GapFill(node=_bp_node("new_gap", [])))  # check doesn't mention c1
     assert planner.expand(_reporter(), _result({"missing_prerequisites": ["q?"]}), _goal()) == []
+
+
+# --- cross-node assertions ------------------------------------------------------------
+
+
+def test_a_cross_node_assertion_must_read_a_real_ancestor():
+    """a2's ancestors are a1 and a0; b0 is in another branch, so the read can never resolve."""
+    blueprint = _blueprint(
+        b0=["structured['size'] > 0"], a2=["structured['x'] <= ancestors['b0']['size']"]
+    )
+    problems = _blueprint_problems(blueprint.nodes, _scope().items)
+    assert any(i == "a2" and "not an ancestor" in m for i, m in problems)
+
+
+def test_a_cross_node_assertion_must_read_a_key_the_ancestor_reports():
+    blueprint = _blueprint(
+        a0=["structured['size'] > 0"], a2=["structured['x'] <= ancestors['a0']['ceiling']"]
+    )
+    problems = _blueprint_problems(blueprint.nodes, _scope().items)
+    assert any(i == "a2" and "only reports ['size']" in m for i, m in problems)
+
+
+def test_a_valid_cross_node_assertion_is_kept():
+    check = "structured['x'] <= ancestors['a0']['size']"
+    blueprint = _blueprint(a0=["structured['size'] > 0"], a2=[check])
+    assert _blueprint_problems(blueprint.nodes, _scope().items) == []
+    nodes = {n.node_id: n for n in Planner(_ScriptedLLM([_scope(), blueprint])).plan(_goal())}
+    assert nodes["a2"].pass_condition.assertions == [check]
+
+
+def test_a_cross_node_assertion_that_stays_unresolvable_is_dropped_not_fatal():
+    bad = _blueprint(a2=["structured['x'] <= ancestors['a0']['ceiling']", "structured['x'] > 0"])
+    still_bad = _Blueprint(nodes=[n for n in bad.nodes if n.node_id == "a2"])
+    nodes = {
+        n.node_id: n
+        for n in Planner(_ScriptedLLM([_scope(), bad, still_bad, still_bad])).plan(_goal())
+    }
+    assert nodes["a2"].pass_condition.assertions == ["structured['x'] > 0"]
+
+
+def test_a_correction_that_breaks_a_hard_rule_falls_back_to_the_sound_version():
+    """Live incident: fixing an 'all' in a semantic_check, the model dropped the ancestor
+    name, and the whole plan aborted over a node that had been valid."""
+    unbounded = _blueprint()
+    a1 = next(n for n in unbounded.nodes if n.node_id == "a1")
+    sound = a1.pass_condition.model_copy(update={"semantic_check": "Does it cover all of a0?"})
+    unbounded.nodes[unbounded.nodes.index(a1)] = a1.model_copy(update={"pass_condition": sound})
+    broken = a1.model_copy(update={"pass_condition": a1.pass_condition.model_copy(
+        update={"semantic_check": "Is it consistent with the respective ancestor nodes?"})})
+    llm = _ScriptedLLM([_scope(), unbounded, _Blueprint(nodes=[broken]), _Blueprint(nodes=[broken])])
+
+    nodes = {n.node_id: n for n in Planner(llm).plan(_goal())}
+
+    assert nodes["a1"].pass_condition.semantic_check == "Does it cover all of a0?"
+
+
+# --- revise_check(): the Master reviews a check a node keeps failing ---------------------
+
+from kurogami.agents.planner import _CheckReview
+from kurogami.contracts import FailureReason
+
+_FREE_TIER_CHECK = "all(t['price'] > 0 for t in structured['tiers'])"
+
+
+def _pricing_node(assertions: list[str]) -> NodeSpec:
+    return NodeSpec(
+        node_id="pricing", parent_ids=["wtp"], depth=1, kind=NodeKind.ANALYSIS, title="Pricing",
+        node_goal="Choose pricing tiers.", generated_prompt="Choose tiers.",
+        pass_condition=PassCondition(assertions=assertions, semantic_check="Under wtp?"),
+    )
+
+
+def _pricing_result() -> NodeResult:
+    return NodeResult(node_id="pricing", output="Free, 199, 399", structured={"tiers": []},
+                      tokens_in=1, tokens_out=1, latency_ms=1, model_id="f", prompt_version="v")
+
+
+def _failed(assertion: str) -> FailureReason:
+    return FailureReason(summary="assertion evaluated to False", violated="assertion",
+                         evidence=assertion)
+
+
+def test_a_wrong_check_is_replaced_and_the_others_kept():
+    """Live incident, twice: 'every price > 0' forbade the free tier the node chose."""
+    node = _pricing_node(["len(structured['tiers']) >= 2", _FREE_TIER_CHECK])
+    review = _CheckReview(check_is_wrong=True, explanation="forbids a free tier",
+                          replacement_assertions=["all(t['price'] >= 0 for t in structured['tiers'])"])
+    revised = Planner(_ScriptedLLM([review])).revise_check(
+        node, _pricing_result(), _failed(_FREE_TIER_CHECK)
+    )
+    assert revised.assertions == [
+        "len(structured['tiers']) >= 2", "all(t['price'] >= 0 for t in structured['tiers'])"
+    ]
+
+
+def test_a_check_judged_right_is_kept_and_the_node_fails():
+    review = _CheckReview(check_is_wrong=False, explanation="x", replacement_assertions=[])
+    node = _pricing_node([_FREE_TIER_CHECK])
+    assert Planner(_ScriptedLLM([review])).revise_check(
+        node, _pricing_result(), _failed(_FREE_TIER_CHECK)) is None
+
+
+def test_a_check_against_an_ancestor_is_never_revised_here():
+    check = "structured['price'] <= ancestors['wtp']['max']"
+    llm = _ScriptedLLM([])
+    assert Planner(llm).revise_check(_pricing_node([check]), _pricing_result(), _failed(check)) is None
+    assert llm.prompts == []
+
+
+def test_an_unsafe_replacement_is_dropped():
+    review = _CheckReview(check_is_wrong=True, explanation="x",
+                          replacement_assertions=["__import__('os')", "structured['x'] > 0"])
+    revised = Planner(_ScriptedLLM([review])).revise_check(
+        _pricing_node([_FREE_TIER_CHECK]), _pricing_result(), _failed(_FREE_TIER_CHECK))
+    assert revised.assertions == ["structured['x'] > 0"]

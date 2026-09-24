@@ -1,24 +1,18 @@
 """Level 3: run a node's self-written prompt. Generic -- no domain logic here."""
 
-import ast
 import hashlib
 import json
-import re
 import time
 from typing import Any
 
 from kurogami.agents._prompt_loader import load_prompt
+from kurogami.agents._structured import (
+    example_value,
+    extract_structured,
+    required_structured_keys,
+    resolved_ancestor_values,
+)
 from kurogami.contracts import LLMPort, NodeKind, NodeResult, NodeSpec, SearchPort
-
-_FENCED_JSON_PATTERN = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
-
-
-def _is_structured(node: ast.AST) -> bool:
-    return isinstance(node, ast.Name) and node.id == "structured"
-
-
-def _constant(node: ast.AST) -> object:
-    return node.value if isinstance(node, ast.Constant) else None
 
 
 def _render(prompt_name: str, **fields: str) -> str:
@@ -87,10 +81,23 @@ class Executor:
                 "execute_keys",
                 keys=", ".join(required_keys),
                 checks=checks,
-                example=json.dumps(dict.fromkeys(required_keys, "..."), indent=2),
+                example=json.dumps(
+                    {key: example_value(key, assertions) for key in required_keys}, indent=2
+                ),
             )
         elif assertions:
             key_rules = _render("execute_checks", checks=checks)
+        # Seen live: a check comparing against an ancestor's number is unanswerable if
+        # the model has to dig that number out of 30k chars of context -- show it.
+        ancestor_values = resolved_ancestor_values(assertions, node.context)
+        if ancestor_values:
+            key_rules += "\n" + _render(
+                "execute_ancestor_values", values="\n".join(f"- {v}" for v in ancestor_values)
+            )
+        # Seen live: the final decision restated headlines in ~600 words with no
+        # figures -- nothing asked it to carry the investigation's numbers through.
+        if node.kind == NodeKind.DECISION:
+            parts.append(_render("execute_decision"))
         # Always asked for, so any node can report an unplanned prerequisite
         # (the only trigger for runtime gap-filling -- see agents/planner.py).
         parts.append(_render("execute_structured", key_rules=key_rules))
@@ -99,71 +106,11 @@ class Executor:
 
     @staticmethod
     def _required_structured_keys(assertions: list[str]) -> list[str]:
-        """Top-level keys the assertions read from `structured`, in order.
-
-        Read from the parsed expression, not a regex: seen live, once `.get` was
-        allowed, `structured.get('competitors')` slipped past a subscript-only regex,
-        the model was never told the key, named it `tools`, and every run failed.
-        Covers structured['k'], structured.get('k'), 'k' in structured, and a
-        literal list of keys tested with `k in structured`.
-        """
-        keys: list[str] = []
-
-        def add(value: object) -> None:
-            if isinstance(value, str) and value not in keys:
-                keys.append(value)
-
-        for assertion in assertions:
-            try:
-                tree = ast.parse(assertion, mode="eval")
-            except SyntaxError:
-                continue
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Subscript) and _is_structured(node.value):
-                    add(_constant(node.slice))
-                elif (
-                    isinstance(node, ast.Call)
-                    and isinstance(node.func, ast.Attribute)
-                    and node.func.attr == "get"
-                    and _is_structured(node.func.value)
-                    and node.args
-                ):
-                    add(_constant(node.args[0]))
-                elif isinstance(node, ast.Compare) and any(
-                    isinstance(op, ast.In | ast.NotIn) for op in node.ops
-                ) and any(_is_structured(c) for c in node.comparators):
-                    add(_constant(node.left))
-                    if isinstance(node.left, ast.Name):  # `k in structured for k in [...]`
-                        for gen in ast.walk(tree):
-                            if (
-                                isinstance(gen, ast.comprehension)
-                                and isinstance(gen.target, ast.Name)
-                                and gen.target.id == node.left.id
-                                and isinstance(gen.iter, ast.List | ast.Tuple)
-                            ):
-                                for element in gen.iter.elts:
-                                    add(_constant(element))
-        return keys
+        return required_structured_keys(assertions)
 
     @staticmethod
     def _try_parse_structured(text: str) -> dict[str, Any]:
-        candidates: list[str] = []
-        fenced = _FENCED_JSON_PATTERN.search(text)
-        if fenced is not None:
-            candidates.append(fenced.group(1))
-        candidates.append(text)
-        start, end = text.find("{"), text.rfind("}")
-        if start != -1 and end > start:
-            candidates.append(text[start : end + 1])
-
-        for candidate in candidates:
-            try:
-                parsed = json.loads(candidate)
-            except (json.JSONDecodeError, TypeError):
-                continue
-            if isinstance(parsed, dict):
-                return parsed
-        return {}
+        return extract_structured(text)
 
     @staticmethod
     def _prompt_version(generated_prompt: str) -> str:

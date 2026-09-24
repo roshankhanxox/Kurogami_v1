@@ -15,9 +15,11 @@ from typing import TypeVar
 from pydantic import BaseModel
 
 from kurogami.agents._prompt_loader import load_prompt
+from kurogami.agents._structured import ancestor_references, required_structured_keys
 from kurogami.agents.rules import ALLOWED_FUNCTIONS, UnsafeAssertionError, validate_assertion
 from kurogami.contracts import (
     BudgetLimits,
+    FailureReason,
     GoalSpec,
     LLMPort,
     NodeKind,
@@ -92,6 +94,12 @@ class _GapFill(BaseModel):
     node: _BlueprintNode | None
 
 
+class _CheckReview(BaseModel):
+    check_is_wrong: bool
+    explanation: str
+    replacement_assertions: list[str]
+
+
 class Planner:
     """Plans the complete tree up front; expand() is bounded gap-filling only."""
 
@@ -147,6 +155,45 @@ class Planner:
             )
         ]
 
+    def revise_check(
+        self, node: NodeSpec, result: NodeResult, reason: FailureReason
+    ) -> PassCondition | None:
+        """A corrected pass condition if the check -- not the answer -- is at fault, else None.
+
+        Seen live, twice: a check "every tier's price > 0" forbade the free tier the
+        pricing node chose on every attempt, so the node gave up and the decision
+        never ran. Only the Master, who wrote the check, may judge it. A check against
+        an ancestor's figure is never revised here -- that contradiction is the
+        localiser's to assign.
+        """
+        failing = next(
+            (a for a in node.pass_condition.assertions if reason.evidence.startswith(a)), None
+        )
+        if failing is None or ancestor_references(failing):
+            return None
+        prompt = load_prompt("revise_check").format(
+            node_json=node.model_dump_json(indent=2, exclude={"context"}),
+            assertion=failing,
+            reason=reason.summary,
+            output=result.output,
+            allowed_functions=", ".join(ALLOWED_FUNCTIONS),
+        )
+        review = self._ask(prompt, _CheckReview)
+        if not review.check_is_wrong:
+            return None
+        replacements = [
+            a for a in review.replacement_assertions[:2]
+            if _assertion_error(a) is None and not ancestor_references(a)
+        ]
+        _log.warning(
+            "revised check on %s: %r -> %r (%s)",
+            node.node_id, failing, replacements, review.explanation,
+        )
+        assertions = []
+        for assertion in node.pass_condition.assertions:
+            assertions.extend(replacements if assertion == failing else [assertion])
+        return node.pass_condition.model_copy(update={"assertions": assertions})
+
     def _scope_goal(self, goal: GoalSpec) -> list[_ScopeItem]:
         prompt = load_prompt("scope").format(
             goal_json=goal.model_dump_json(indent=2),
@@ -175,6 +222,7 @@ class Planner:
             allowed_functions=", ".join(ALLOWED_FUNCTIONS),
         )
         blueprint = self._ask(prompt, _Blueprint).nodes
+        versions = [blueprint]
         for _ in range(MAX_CORRECTIONS):
             problems = _blueprint_problems(blueprint, scope)
             if not problems:
@@ -190,6 +238,8 @@ class Planner:
             )
             fixed = {n.node_id: n for n in self._ask(prompt + note, _Blueprint).nodes}
             blueprint = _merge_corrections(blueprint, fixed, problems, _ids(scope))
+            versions.append(blueprint)
+        blueprint = _without_regressions(versions, scope)
         # Unevaluable assertions left after the corrections are dropped (and logged);
         # structural problems cannot be.
         structural = _blueprint_problems(blueprint, scope, strict=False)
@@ -340,6 +390,7 @@ def _blueprint_problems(
         problems.append((dup, f"{dup}: more than one node was written"))
 
     deps = {item.id: item.depends_on for item in scope}
+    reported_keys = _reported_keys(blueprint)
     for node in blueprint:
         if node.node_id not in deps:
             continue
@@ -372,12 +423,70 @@ def _blueprint_problems(
             problems.append((node.node_id, message))
         if strict:
             for assertion in node.pass_condition.assertions:
-                error = _assertion_error(assertion)
+                error = _assertion_error(assertion) or _ancestor_error(
+                    assertion, ancestors, reported_keys
+                )
                 if error is not None:
                     problems.append(
                         (node.node_id, f"{node.node_id}: assertion `{assertion}` -> {error}")
                     )
     return problems
+
+
+def _reported_keys(blueprint: list[_BlueprintNode]) -> dict[str, list[str]]:
+    """The keys each node will be told to report: exactly those its own assertions read."""
+    return {n.node_id: required_structured_keys(n.pass_condition.assertions) for n in blueprint}
+
+
+def _ancestor_error(
+    assertion: str, ancestors: set[str], reported_keys: dict[str, list[str]]
+) -> str | None:
+    """A cross-node read that could never resolve: not an ancestor, or a key never reported.
+
+    Either one raises KeyError on every attempt, so the node could never pass.
+    """
+    for ancestor, key in ancestor_references(assertion):
+        if ancestor not in ancestors:
+            return (
+                f"reads ancestors['{ancestor}'], but {ancestor} is not an ancestor of this "
+                f"node (its ancestors are {sorted(ancestors) or 'none'})"
+            )
+        if key is not None and key not in reported_keys.get(ancestor, []):
+            available = reported_keys.get(ancestor) or []
+            return (
+                f"reads ancestors['{ancestor}']['{key}'], but {ancestor} only reports "
+                f"{available or 'no keys'} -- compare against one of those, or add an "
+                f"assertion to {ancestor} that reads '{key}'"
+            )
+    return None
+
+
+def _without_regressions(
+    versions: list[list[_BlueprintNode]], scope: list[_ScopeItem]
+) -> list[_BlueprintNode]:
+    """The latest blueprint, except that a node a correction broke structurally keeps its
+    last structurally sound version.
+
+    Seen live: asked to drop "all" from a semantic_check (a quality bar), the model
+    rewrote it to "consistent with the respective ancestor nodes" -- naming no ancestor
+    (a hard rule) -- and the whole plan aborted over a node that was valid before.
+    """
+    latest = versions[-1]
+    broken = {i for i, _ in _blueprint_problems(latest, scope, strict=False)}
+    if not broken:
+        return latest
+    result = {n.node_id: n for n in latest}
+    for node_id in broken:
+        for version in reversed(versions[:-1]):
+            candidate = {n.node_id: n for n in version}.get(node_id)
+            if candidate is None:
+                continue
+            trial = [candidate if n.node_id == node_id else n for n in result.values()]
+            if node_id not in {i for i, _ in _blueprint_problems(trial, scope, strict=False)}:
+                _log.warning("correction broke %s; keeping its earlier sound version", node_id)
+                result[node_id] = candidate
+                break
+    return list(result.values())
 
 
 def _merge_corrections(
@@ -443,18 +552,34 @@ def _assemble(scope: list[_ScopeItem], blueprint: list[_BlueprintNode]) -> list[
     assert order is not None  # _scope_problems already rejected cycles
     depths = _depths(order, deps)
     written = {n.node_id: n for n in blueprint}
+    reported_keys = _reported_keys(blueprint)
     return [
-        _to_node_spec(written[n], parent_ids=deps[n], depth=depths[n], kind=kinds[n])
+        _to_node_spec(
+            written[n],
+            parent_ids=deps[n],
+            depth=depths[n],
+            kind=kinds[n],
+            ancestors=_ancestors(n, deps),
+            reported_keys=reported_keys,
+        )
         for n in order
     ]
 
 
 def _to_node_spec(
-    node: _BlueprintNode, *, parent_ids: list[str], depth: int, kind: NodeKind
+    node: _BlueprintNode,
+    *,
+    parent_ids: list[str],
+    depth: int,
+    kind: NodeKind,
+    ancestors: set[str] | None = None,
+    reported_keys: dict[str, list[str]] | None = None,
 ) -> NodeSpec:
     kept = []
     for assertion in node.pass_condition.assertions:
         error = _assertion_error(assertion)
+        if error is None and ancestors is not None and reported_keys is not None:
+            error = _ancestor_error(assertion, ancestors, reported_keys)
         if error is None:
             kept.append(assertion)
         else:

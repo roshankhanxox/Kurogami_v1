@@ -10,8 +10,13 @@ from kurogami.contracts import FailureReason, LLMPort, NodeResult, NodeSpec, Ver
 
 
 class _VerifyResponse(BaseModel):
-    """Decoding envelope only. node_id/checked_by are set by us, not trusted from the model."""
+    """Decoding envelope only. node_id/checked_by are set by us, not trusted from the model.
 
+    checked_claims comes first so the model compares figures before it decides. Seen
+    live: with verdict first, 57 of 57 answers were a bare 10-token PASS.
+    """
+
+    checked_claims: list[str]
     verdict: Literal["PASS", "FAIL"]
     reason: FailureReason | None = None
 

@@ -442,3 +442,103 @@ def test_a_node_that_gave_up_but_was_later_regenerated_does_not_mark_the_run_inc
     assert report.snapshot.statuses["b"] == NodeStatus.INVALIDATED
     assert report.snapshot.statuses["b~r1"] == NodeStatus.PASSED
     assert report.incomplete_reason is None
+
+
+class _FailFirstRules:
+    """A deterministic FAIL on `node_id`'s first run; no suspects -- rules can't assign blame."""
+
+    def __init__(self, node_id: str) -> None:
+        self._node_id, self._done = node_id, False
+
+    def check(self, node: NodeSpec, result: NodeResult) -> Verdict:
+        if node.node_id == self._node_id and not self._done:
+            self._done = True
+            return Verdict(
+                node_id=node.node_id, verdict="FAIL", checked_by="rules",
+                reason=FailureReason(
+                    summary="assertion evaluated to False", violated="assertion",
+                    evidence="structured['price'] <= ancestors['b']['ceiling']",
+                ),
+            )
+        return Verdict(node_id=node.node_id, verdict="PASS", checked_by="rules")
+
+
+class _BlamingLocaliser:
+    def __init__(self, suspect: str) -> None:
+        self.suspect, self.calls = suspect, 0
+
+    def localise(self, node, result, reason, context):
+        self.calls += 1
+        return reason.model_copy(update={"suspect_node_ids": [self.suspect]})
+
+
+def test_a_deterministic_fail_is_localised_and_backtracks_to_the_ancestor():
+    """G6 without an LLM verdict: a rule proves the contradiction, the localiser names
+    the ancestor, and the engine regenerates from there."""
+    localiser = _BlamingLocaliser("a")
+    executor = _RecordingExecutor()
+    sink = _MemoryTraceSink()
+    runner = Runner(
+        interpreter=_FakeInterpreter(), planner=_BlueprintPlanner(), executor=executor,
+        rules_checker=_FailFirstRules("c"), verifier=_AlwaysPassVerifier(),
+        interrupt=_NeverInterrupt(), trace_sink=sink, localiser=localiser,
+    )
+    report = runner.run("goal")
+
+    assert localiser.calls == 1
+    assert [r.backtrack_target for r in sink.records if r.verifier_verdict == "FAIL"] == ["a"]
+    assert [n.node_id for n in executor.runs] == ["a", "b", "c", "a", "b~r1", "c~r1"]
+    assert report.snapshot.statuses["b"] == NodeStatus.INVALIDATED
+    assert not report.incomplete_reason and not report.budget_breached
+
+
+def test_without_a_localiser_a_deterministic_fail_is_the_nodes_own_retry():
+    executor = _RecordingExecutor()
+    sink = _MemoryTraceSink()
+    Runner(
+        interpreter=_FakeInterpreter(), planner=_BlueprintPlanner(), executor=executor,
+        rules_checker=_FailFirstRules("c"), verifier=_AlwaysPassVerifier(),
+        interrupt=_NeverInterrupt(), trace_sink=sink,
+    ).run("goal")
+    assert [n.node_id for n in executor.runs] == ["a", "b", "c", "c"]
+
+
+class _AlwaysFailRules:
+    def check(self, node: NodeSpec, result: NodeResult) -> Verdict:
+        if node.node_id == "b" and node.pass_condition.assertions != ["fixed"]:
+            return Verdict(node_id="b", verdict="FAIL", checked_by="rules", reason=FailureReason(
+                summary="assertion evaluated to False", violated="assertion", evidence="bad"))
+        return Verdict(node_id=node.node_id, verdict="PASS", checked_by="rules")
+
+
+class _Reviser:
+    def __init__(self, fix: bool) -> None:
+        self.fix, self.calls = fix, 0
+
+    def revise_check(self, node, result, reason):
+        self.calls += 1
+        return PassCondition(assertions=["fixed"], semantic_check="ok?") if self.fix else None
+
+
+def _revising_runner(reviser, executor):
+    return Runner(
+        interpreter=_FakeInterpreter(), planner=_BlueprintPlanner(), executor=executor,
+        rules_checker=_AlwaysFailRules(), verifier=_AlwaysPassVerifier(),
+        interrupt=_NeverInterrupt(), trace_sink=_MemoryTraceSink(), check_reviser=reviser,
+    )
+
+
+def test_a_revised_check_gives_the_node_one_more_run_and_the_tree_finishes():
+    reviser, executor = _Reviser(fix=True), _RecordingExecutor()
+    report = _revising_runner(reviser, executor).run("goal")
+    assert reviser.calls == 1
+    assert [n.node_id for n in executor.runs].count("b") == 4  # 3 failed attempts + 1 after revision
+    assert report.snapshot.statuses["c"] == NodeStatus.PASSED
+    assert not report.incomplete_reason
+
+
+def test_a_check_kept_by_the_planner_still_gives_up_after_one_review():
+    reviser, executor = _Reviser(fix=False), _RecordingExecutor()
+    report = _revising_runner(reviser, executor).run("goal")
+    assert reviser.calls == 1
+    assert report.incomplete_reason and "gave up on b" in report.incomplete_reason

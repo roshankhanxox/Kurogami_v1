@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kurogami Run</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #f6f7f9; --surface: #ffffff; --surface-2: #f0f2f5; --border: #dfe3e8;
+  --text: #16191d; --muted: #5d6673; --accent: #5b5bd6;
+  --pass: #1f9d55; --pass-bg: #e6f6ec; --fail: #d33a3a; --fail-bg: #fdecec;
+  --warn: #c77700; --warn-bg: #fff4e0; --dead: #9aa3ad; --dead-bg: #f1f2f4;
+  --pending: #7a8390; --pending-bg: #f4f5f7; --decision: #7c3aed;
+  --ancestor: #2563eb; --descendant: #ea580c;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1115; --surface: #171a20; --surface-2: #1e222a; --border: #2a303a;
+    --text: #e7eaee; --muted: #9aa4b1; --accent: #8b8bf5;
+    --pass: #4ade80; --pass-bg: #12291c; --fail: #f87171; --fail-bg: #2e1616;
+    --warn: #fbbf24; --warn-bg: #2c2210; --dead: #6b7380; --dead-bg: #1b1e24;
+    --pending: #8b94a1; --pending-bg: #1b1e24; --decision: #a78bfa;
+    --ancestor: #60a5fa; --descendant: #fb923c;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f1115; --surface: #171a20; --surface-2: #1e222a; --border: #2a303a;
+  --text: #e7eaee; --muted: #9aa4b1; --accent: #8b8bf5;
+  --pass: #4ade80; --pass-bg: #12291c; --fail: #f87171; --fail-bg: #2e1616;
+  --warn: #fbbf24; --warn-bg: #2c2210; --dead: #6b7380; --dead-bg: #1b1e24;
+  --pending: #8b94a1; --pending-bg: #1b1e24; --decision: #a78bfa;
+  --ancestor: #60a5fa; --descendant: #fb923c;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { background: var(--bg); color: var(--text); font: 14px/1.55 Inter, system-ui, sans-serif; }
+header { padding: 20px 24px 16px; border-bottom: 1px solid var(--border); background: var(--surface); }
+.eyebrow { font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--accent); }
+h1 { font-size: 20px; line-height: 1.35; margin: 6px 0 12px; font-weight: 600; max-width: 1000px; }
+.stats { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px;
+        background: var(--surface-2); border: 1px solid var(--border); font-size: 12.5px; color: var(--muted); }
+.chip b { color: var(--text); font-weight: 600; }
+.chip.ok { background: var(--pass-bg); color: var(--pass); border-color: transparent; }
+.chip.bad { background: var(--fail-bg); color: var(--fail); border-color: transparent; }
+main { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); min-height: calc(100vh - 118px); }
+#graph-wrap { border-right: 1px solid var(--border); overflow: auto; padding: 16px; position: relative; }
+.legend { display: flex; flex-wrap: wrap; gap: 12px; font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+.legend span::before { content: ""; display: inline-block; width: 10px; height: 10px; border-radius: 3px;
+                       margin-right: 5px; vertical-align: -1px; background: var(--c); }
+#graph { min-width: 520px; }
+#graph svg { max-width: none !important; height: auto; }
+#graph .node { cursor: pointer; }
+/* Mermaid writes node colours as inline !important styles, so relationships are
+   shown with a glow filter, which those styles don't touch. */
+#graph .node.selected { filter: drop-shadow(0 0 1.5px var(--accent)) drop-shadow(0 0 7px var(--accent)); }
+#graph .node.anc { filter: drop-shadow(0 0 1px var(--ancestor)) drop-shadow(0 0 5px var(--ancestor)); }
+#graph .node.dim { opacity: .3; }
+#graph .node.desc { filter: drop-shadow(0 0 1px var(--descendant)) drop-shadow(0 0 5px var(--descendant)); }
+#graph .node text { fill: var(--text) !important; }
+#graph .node.invalidated text { text-decoration: line-through; }
+aside { overflow: auto; background: var(--surface); }
+.panel-head { padding: 18px 20px 12px; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--surface); z-index: 1; }
+.panel-head h2 { margin: 0 0 4px; font-size: 17px; font-weight: 600; }
+.meta { color: var(--muted); font-size: 12.5px; }
+.goal { margin: 8px 0 0; font-style: italic; color: var(--muted); }
+.tabs { display: flex; gap: 4px; margin-top: 12px; }
+.tabs button { font: inherit; font-size: 13px; padding: 6px 12px; border-radius: 8px; border: 1px solid transparent;
+               background: none; color: var(--muted); cursor: pointer; }
+.tabs button[aria-selected="true"] { background: var(--surface-2); color: var(--text); border-color: var(--border); }
+.tab { padding: 16px 20px 32px; display: none; }
+.tab.active { display: block; }
+.md { overflow-wrap: anywhere; }
+.md h1, .md h2, .md h3 { font-size: 15px; margin: 18px 0 6px; }
+.md table { border-collapse: collapse; display: block; overflow-x: auto; }
+.md td, .md th { border: 1px solid var(--border); padding: 4px 8px; }
+.md code, pre, .mono { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 12.5px; }
+pre { background: var(--surface-2); padding: 12px; border-radius: 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.check { padding: 8px 10px; border-radius: 8px; background: var(--surface-2); margin: 6px 0; font-family: "JetBrains Mono", monospace; font-size: 12.5px; overflow-wrap: anywhere; }
+.check.cross { border-left: 3px solid var(--ancestor); }
+.attempt { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; margin: 10px 0; }
+.attempt .v { font-weight: 600; }
+.attempt.PASS .v { color: var(--pass); } .attempt.FAIL .v { color: var(--fail); }
+.bt { color: var(--warn); font-weight: 500; }
+.empty { color: var(--muted); font-style: italic; }
+h3.sec { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 18px 0 6px; }
+.theme { position: absolute; top: 20px; right: 24px; }
+.theme button { font: inherit; font-size: 12px; background: var(--surface-2); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 4px 10px; cursor: pointer; }
+header { position: relative; }
+@media (max-width: 860px) {
+  header { padding: 16px; } .theme { top: 14px; right: 16px; }
+  h1 { font-size: 17px; padding-right: 64px; }
+  main { grid-template-columns: 1fr; }
+  #graph-wrap { border-right: none; border-bottom: 1px solid var(--border); max-height: 70vh; padding: 12px 16px; }
+  .panel-head, .tab { padding-left: 16px; padding-right: 16px; }
+}
+</style>
+</head>
+<body>
+<header>
+  <div class="eyebrow">Kurogami run</div>
+  <h1 id="goal"></h1>
+  <div class="stats" id="stats"></div>
+  <div class="theme"><button id="theme-btn" type="button">Theme</button></div>
+</header>
+<main>
+  <section id="graph-wrap">
+    <div class="legend">
+      <span style="--c: var(--pass)">passed</span>
+      <span style="--c: var(--fail)">failed</span>
+      <span style="--c: var(--dead)">thrown away by a backtrack</span>
+      <span style="--c: var(--warn)">skipped</span>
+      <span style="--c: var(--pending)">not run</span>
+      <span style="--c: var(--ancestor)">what the selected node sees</span>
+      <span style="--c: var(--descendant)">what a backtrack there would redo</span>
+    </div>
+    <div id="graph"></div>
+  </section>
+  <aside id="panel">
+    <div class="panel-head">
+      <h2 id="p-title">Select a node</h2>
+      <div class="meta" id="p-meta">Click any node in the graph.</div>
+      <p class="goal" id="p-goal"></p>
+      <div class="tabs" role="tablist">
+        <button type="button" role="tab" data-tab="output" aria-selected="true">Output</button>
+        <button type="button" role="tab" data-tab="checks" aria-selected="false">Checks</button>
+        <button type="button" role="tab" data-tab="prompt" aria-selected="false">Prompt</button>
+      </div>
+    </div>
+    <div class="tab active" id="tab-output"></div>
+    <div class="tab" id="tab-checks"></div>
+    <div class="tab" id="tab-prompt"></div>
+  </aside>
+</main>
+<script id="run-data" type="application/json">__RUN_DATA__</script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
+<script>
+(function () {
+  const data = JSON.parse(document.getElementById("run-data").textContent);
+  const snap = data.snapshot, specs = snap.specs, statuses = snap.statuses, results = snap.results || {};
+  const attempts = data.attempts || {};
+  const ids = Object.keys(specs);
+  const alias = {}; ids.forEach((id, i) => { alias[id] = "n" + i; });
+  const byAlias = {}; ids.forEach(id => { byAlias[alias[id]] = id; });
+
+  // theme
+  const root = document.documentElement;
+  const saved = (() => { try { return localStorage.getItem("kg-theme"); } catch (e) { return null; } })();
+  if (saved) root.dataset.theme = saved;
+  document.getElementById("theme-btn").onclick = () => {
+    const dark = getComputedStyle(root).getPropertyValue("--bg").trim() === "#0f1115";
+    root.dataset.theme = dark ? "light" : "dark";
+    try { localStorage.setItem("kg-theme", root.dataset.theme); } catch (e) {}
+    draw();
+  };
+
+  // header
+  document.getElementById("goal").textContent = data.goal;
+  const count = s => Object.values(statuses).filter(x => x === s).length;
+  const fails = Object.values(attempts).flat().filter(a => a.verdict === "FAIL").length;
+  const realBt = (snap.backtrack_events || []).filter(e => e.target_node_id !== e.failing_node_id).length;
+  const tokens = Object.values(attempts).flat().reduce((t, a) => t + (a.tokens || 0), 0);
+  const stats = [
+    [data.outcome ? "bad" : "ok", data.outcome ? "✗ " + data.outcome : "✓ complete"],
+    ["", `<b>${count("passed")}</b> passed`],
+    ["", `<b>${fails}</b> failed attempts`],
+    ["", `<b>${realBt}</b> backtracks`],
+    ["", `<b>${count("invalidated")}</b> thrown away`],
+    ["", `<b>${Object.keys(specs).length}</b> nodes`],
+  ];
+  if (tokens) stats.push(["", `<b>${tokens.toLocaleString()}</b> node tokens`]);
+  document.getElementById("stats").innerHTML =
+    stats.map(([c, t]) => `<span class="chip ${c}">${t}</span>`).join("");
+
+  // relationships
+  const parents = id => specs[id].parent_ids.filter(p => specs[p]);
+  const children = {}; ids.forEach(id => parents(id).forEach(p => (children[p] = children[p] || []).push(id)));
+  const walk = (start, next) => { const seen = new Set(), st = [...next(start)];
+    while (st.length) { const n = st.pop(); if (!seen.has(n)) { seen.add(n); st.push(...next(n)); } } return seen; };
+
+  function css(v) { return getComputedStyle(root).getPropertyValue(v).trim(); }
+  function label(id) {
+    const s = specs[id], st = statuses[id];
+    const icon = { passed: "✓", failed: "✗", invalidated: "⤫", skipped: "⊘", pending: "○", running: "◐" }[st] || "";
+    const t = (s.title || id).replace(/["<>]/g, "");
+    return `${icon} ${t}`;
+  }
+
+  async function draw() {
+    mermaid.initialize({
+      // SVG text labels: the browser measures them itself. HTML labels were sized
+      // before the web font loaded and came out clipped, or zero-width.
+      startOnLoad: false, securityLevel: "loose", theme: "base", htmlLabels: false,
+      flowchart: { curve: "basis", nodeSpacing: 28, rankSpacing: 46, htmlLabels: false, padding: 12 },
+      themeVariables: { fontFamily: "Inter, system-ui, sans-serif", fontSize: "13px",
+        lineColor: css("--muted"), primaryTextColor: css("--text") },
+    });
+    const lines = ["flowchart TB"];
+    ids.forEach(id => {
+      const a = alias[id], l = label(id);
+      lines.push(specs[id].kind === "decision" ? `  ${a}{{"${l}"}}` : `  ${a}["${l}"]`);
+    });
+    const edgeIdx = []; let e = 0;
+    ids.forEach(id => parents(id).forEach(p => { lines.push(`  ${alias[p]} --> ${alias[id]}`); e++; }));
+    (snap.backtrack_events || []).forEach(ev => {
+      if (ev.target_node_id !== ev.failing_node_id && specs[ev.failing_node_id] && specs[ev.target_node_id]) {
+        lines.push(`  ${alias[ev.failing_node_id]} -. backtrack .-> ${alias[ev.target_node_id]}`); edgeIdx.push(e++);
+      }
+    });
+    const cls = { passed: ["--pass-bg", "--pass"], failed: ["--fail-bg", "--fail"], invalidated: ["--dead-bg", "--dead"],
+                  skipped: ["--warn-bg", "--warn"], pending: ["--pending-bg", "--pending"], running: ["--warn-bg", "--warn"] };
+    Object.entries(cls).forEach(([k, [bg, fg]]) =>
+      lines.push(`  classDef ${k} fill:${css(bg)},stroke:${css(fg)},color:${css("--text")},stroke-width:1.5px`));
+    ids.forEach(id => lines.push(`  class ${alias[id]} ${statuses[id]}`));
+    edgeIdx.forEach(i => lines.push(`  linkStyle ${i} stroke:${css("--fail")},stroke-width:2px,color:${css("--fail")}`));
+    ids.forEach(id => lines.push(`  click ${alias[id]} kgSelect`));
+    const { svg, bindFunctions } = await mermaid.render("kg-graph", lines.join("\n"));
+    const el = document.getElementById("graph"); el.innerHTML = svg;
+    if (bindFunctions) bindFunctions(el);
+    if (current) highlight(current);
+  }
+
+  let current = null;
+  // Mermaid 11 prefixes ids with the render id: "kg-graph-flowchart-n1-1".
+  function nodeEl(id) { return document.querySelector(`#graph [id*="-flowchart-${alias[id]}-"]`); }
+  function highlight(id) {
+    const anc = walk(id, parents), desc = walk(id, n => children[n] || []);
+    ids.forEach(n => {
+      const g = nodeEl(n); if (!g) return;
+      g.classList.toggle("selected", n === id);
+      g.classList.toggle("anc", anc.has(n)); g.classList.toggle("desc", desc.has(n));
+      g.classList.toggle("dim", n !== id && !anc.has(n) && !desc.has(n));
+    });
+  }
+  const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const md = s => DOMPurify.sanitize(marked.parse(String(s || "")));
+
+  window.kgSelect = function (a) {
+    const id = byAlias[a] || a; current = id; highlight(id);
+    history.replaceState(null, "", "#node=" + encodeURIComponent(id));
+    const s = specs[id], tries = attempts[id] || [], r = results[id];
+    document.getElementById("p-title").textContent = s.title || id;
+    document.getElementById("p-meta").textContent =
+      `${id} · ${s.kind} · depth ${s.depth} · ${statuses[id]}` + (parents(id).length ? ` · builds on ${parents(id).join(", ")}` : "");
+    document.getElementById("p-goal").textContent = s.node_goal;
+    const out = r ? r.output : (tries.length ? tries[tries.length - 1].output : "");
+    document.getElementById("tab-output").innerHTML = out ? `<div class="md">${md(out)}</div>` : `<p class="empty">This node did not run.</p>`;
+    const checks = (s.pass_condition.assertions || []).map(a =>
+      `<div class="check ${a.includes("ancestors") ? "cross" : ""}">${esc(a)}</div>`).join("") || `<p class="empty">No deterministic checks.</p>`;
+    const tri = tries.map((t, i) => `<div class="attempt ${t.verdict}"><span class="v">Attempt ${i + 1}: ${t.verdict}</span>` +
+      (t.failure_reason ? `<div>${esc(t.failure_reason)}</div>` : "") +
+      (t.backtrack_target ? `<div class="bt">↩ ${t.backtrack_target === id ? "retried itself" : "backtracked to " + esc(t.backtrack_target)}</div>` : "") +
+      `</div>`).join("");
+    document.getElementById("tab-checks").innerHTML =
+      `<h3 class="sec">Deterministic checks</h3>${checks}` +
+      `<h3 class="sec">Verifier question</h3><p>${esc(s.pass_condition.semantic_check)}</p>` +
+      (tri ? `<h3 class="sec">Attempts</h3>${tri}` : "");
+    const cons = (s.injected_constraints || []).map(c => `<li>${esc(c)}</li>`).join("");
+    document.getElementById("tab-prompt").innerHTML = `<pre>${esc(s.generated_prompt)}</pre>` +
+      (cons ? `<h3 class="sec">Human constraints</h3><ul>${cons}</ul>` : "");
+  };
+
+  document.querySelectorAll(".tabs button").forEach(b => b.onclick = () => {
+    document.querySelectorAll(".tabs button").forEach(x => x.setAttribute("aria-selected", x === b));
+    document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.id === "tab-" + b.dataset.tab));
+  });
+
+  // Measure labels with the real font, or Mermaid sizes boxes too small and clips them.
+  (document.fonts ? document.fonts.ready : Promise.resolve()).then(draw).then(() => {
+    const linked = new URLSearchParams(location.hash.slice(1)).get("node");
+    const decision = ids.filter(id => specs[id].kind === "decision" && statuses[id] !== "invalidated").pop();
+    const start = specs[linked] ? linked : decision;
+    if (start) kgSelect(alias[start]);
+  });
+})();
+</script>
+</body>
+</html>
