@@ -1,0 +1,623 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kurogami Run</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #f6f7f9; --surface: #ffffff; --surface-2: #f0f2f5; --border: #dfe3e8;
+  --text: #16191d; --muted: #5d6673; --accent: #5b5bd6;
+  --pass: #1f9d55; --pass-bg: #e6f6ec; --fail: #d33a3a; --fail-bg: #fdecec;
+  --warn: #c77700; --warn-bg: #fff4e0; --dead: #9aa3ad; --dead-bg: #f1f2f4;
+  --pending: #7a8390; --pending-bg: #f4f5f7; --decision: #7c3aed;
+  --ancestor: #2563eb; --descendant: #ea580c;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1115; --surface: #171a20; --surface-2: #1e222a; --border: #2a303a;
+    --text: #e7eaee; --muted: #9aa4b1; --accent: #8b8bf5;
+    --pass: #4ade80; --pass-bg: #12291c; --fail: #f87171; --fail-bg: #2e1616;
+    --warn: #fbbf24; --warn-bg: #2c2210; --dead: #6b7380; --dead-bg: #1b1e24;
+    --pending: #8b94a1; --pending-bg: #1b1e24; --decision: #a78bfa;
+    --ancestor: #60a5fa; --descendant: #fb923c;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #111315; --surface: #171a1d; --surface-2: #202830; --border: #303e4a;
+  --text: #edf2f6; --muted: #a5b2be; --accent: #6cc4ff;
+  --pass: #4ade80; --pass-bg: #12291c; --fail: #f87171; --fail-bg: #2e1616;
+  --warn: #fbbf24; --warn-bg: #2c2210; --dead: #6b7380; --dead-bg: #1b1e24;
+  --pending: #8b94a1; --pending-bg: #1b1e24; --decision: #a78bfa;
+  --ancestor: #60a5fa; --descendant: #fb923c;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { background: var(--bg); color: var(--text); font: 14px/1.6 Inter, system-ui, sans-serif; }
+header { padding: 28px 32px 24px; border-bottom: 1px solid var(--border); background: var(--surface); }
+.eyebrow { font: 600 13px/1.4 "JetBrains Mono", monospace; color: var(--accent); }
+h1 { font-size: clamp(18px, 2.4vw, 28px); line-height: 1.35; margin: 8px 0 16px; font-weight: 600; max-width: min(1000px, calc(100% - 75px)); overflow-wrap: anywhere; }
+.stats { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border-radius: 4px;
+        background: var(--surface-2); border: 1px solid var(--border); font-size: 12.5px; color: var(--muted); }
+.chip b { color: var(--text); font-weight: 600; }
+.chip.ok { background: var(--pass-bg); color: var(--pass); border-color: transparent; }
+.chip.bad { background: var(--fail-bg); color: var(--fail); border-color: transparent; }
+main { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); min-height: calc(100vh - 118px); }
+#graph-wrap { border-right: 1px solid var(--border); min-width: 0; padding: 20px 24px; }
+.section-title { font: 600 13px/1.5 "JetBrains Mono", monospace; margin: 0 0 10px; color: var(--accent); }
+.legend { display: flex; flex-wrap: wrap; gap: 12px; font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+.legend span::before { content: ""; display: inline-block; width: 10px; height: 10px; border-radius: 3px;
+                       margin-right: 5px; vertical-align: -1px; background: var(--c); }
+#graph { overflow: auto; max-height: 65vh; }
+#graph-view[hidden], #steps[hidden] { display: none; }
+.view-switch { display: flex; gap: 6px; margin-bottom: 14px; }
+.view-switch button, .step-link { font: inherit; cursor: pointer; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 5px; padding: 6px 10px; }
+.view-switch button[aria-pressed="true"], .step-link[aria-current="step"] { background: var(--surface-2); border-color: var(--accent); }
+.steps-list { list-style: none; margin: 0; padding: 0; }
+.step-link { display: grid; width: 100%; grid-template-columns: 3ch minmax(0, 1fr); gap: 10px; text-align: left; margin: 0 0 6px; }
+.step-order { color: var(--muted); font-family: "JetBrains Mono", monospace; }
+.step-state { display: block; color: var(--muted); font-size: 12px; }
+.step-state.pass { color: var(--pass); }
+.step-state.fail { color: var(--fail); }
+.step-state.warn { color: var(--warn); }
+.step-reason { display: block; margin-top: 4px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+#p-deps { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; align-items: center; }
+#p-deps button { font: inherit; color: var(--accent); background: var(--surface-2); border: 1px solid var(--border); border-radius: 4px; cursor: pointer; padding: 2px 6px; }
+#call-stack { margin-top: 1.25rem; border-top: 1px solid var(--border); padding-top: 0.85rem; }
+#call-stack summary { cursor: pointer; font-weight: 600; }
+#call-count { font-family: "JetBrains Mono", monospace; color: var(--accent); }
+.call-header { display: grid; grid-template-columns: 3ch minmax(0, 1fr) auto; gap: 10px; align-items: baseline; list-style: none; }
+.call-header::-webkit-details-marker { display: none; }
+.call-header span:first-child { color: var(--accent); font: 500 12px "JetBrains Mono", monospace; }
+.call-header span:first-child::before { content: "› "; }
+details[open] .call-header span:first-child::before { content: "⌄ "; }
+.call-meta { font: 400 11px "JetBrains Mono", monospace; color: var(--muted); white-space: nowrap; }
+.call-fields { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
+.call-fields pre { margin: 6px 0 0; }
+.call-fields .md { margin-top: 6px; }
+.call-fields h3 { margin: 12px 0 0; font: 600 12px "JetBrains Mono", monospace; color: var(--accent); }
+.graph-canvas { position: relative; width: max-content; min-width: 100%; min-height: 280px; padding: 8px 8px 74px; background-image: radial-gradient(var(--border) 1px, transparent 1px); background-size: 16px 16px; }
+.graph-columns { display: flex; align-items: flex-start; gap: 52px; }
+.graph-column { width: 174px; }
+.graph-column h3 { color: var(--muted); font: 500 12px "JetBrains Mono", monospace; margin: 0 0 10px; }
+.graph-card { position: relative; z-index: 1; display: block; width: 100%; min-height: 66px; margin-bottom: 9px; padding: 8px 26px 8px 8px; text-align: left; font: inherit; line-height: 1.35; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 5px; cursor: pointer; overflow-wrap: anywhere; }
+.graph-grip { position: absolute; right: 3px; top: 4px; padding: 2px 4px; color: var(--muted); cursor: grab; touch-action: none; user-select: none; }
+.graph-card.dragging { z-index: 2; outline: 2px solid var(--accent); outline-offset: 2px; }
+.graph-card.dragging .graph-grip { cursor: grabbing; }
+.graph-card.selected { border-color: var(--accent); background: var(--surface-2); }
+.graph-card.input { border-color: var(--ancestor); }
+.graph-card.output { border-color: var(--descendant); }
+.graph-card.unrelated { color: var(--muted); }
+.graph-card small { display: block; color: var(--muted); margin-top: 4px; }
+.graph-card[data-status="passed"] small { color: var(--pass); }
+.graph-card[data-status="failed"] small { color: var(--fail); }
+.graph-card[data-status="invalidated"] small, .graph-card[data-status="skipped"] small { color: var(--warn); }
+.graph-edges { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+aside { overflow: auto; background: var(--surface); }
+.panel-head { padding: 18px 20px 12px; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--surface); z-index: 1; }
+.panel-head h2 { margin: 0 0 4px; font-size: 17px; font-weight: 600; }
+.meta { color: var(--muted); font-size: 12.5px; }
+.goal { margin: 8px 0 0; font-style: italic; color: var(--muted); }
+.tabs { display: flex; gap: 4px; margin-top: 12px; }
+.tabs button { font: inherit; font-size: 13px; padding: 6px 12px; border-radius: 8px; border: 1px solid transparent;
+               background: none; color: var(--muted); cursor: pointer; }
+.tabs button[aria-selected="true"] { background: var(--surface-2); color: var(--text); border-color: var(--border); border-bottom-color: var(--accent); }
+button:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.tab { padding: 16px 20px 32px; display: none; font-size: 16px; line-height: 1.7; }
+.tab.active { display: block; }
+.md { max-width: 74ch; overflow-wrap: anywhere; }
+.md h1, .md h2, .md h3, .md h4 { font-size: 1.12em; margin: 1.25em 0 .4em; line-height: 1.35; }
+.md p, .md ul, .md ol { margin: 0 0 .8em; }
+.md ul, .md ol { padding-inline-start: 1.65em; }
+.md li + li { margin-top: .3em; }
+.md li > p { margin-bottom: .35em; }
+.md li > ul, .md li > ol { margin: .3em 0 .45em; }
+.md li::marker { color: var(--muted); }
+.md strong { font-weight: 650; }
+.md blockquote { margin: .8em 0; padding: .1em 0 .1em .85em; border-left: 2px solid var(--border); color: var(--muted); }
+.md blockquote > :last-child { margin-bottom: 0; }
+.md hr { border: 0; border-top: 1px solid var(--border); margin: 1em 0; }
+.md a { color: var(--accent); text-underline-offset: .18em; }
+.md table { border-collapse: collapse; display: block; overflow-x: auto; }
+.md td, .md th { border: 1px solid var(--border); padding: 4px 8px; }
+.md code, pre, .mono { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 14px; }
+.md :not(pre) > code { background: var(--surface-2); padding: .08em .25em; border-radius: 3px; }
+pre { background: var(--surface-2); padding: 14px; border-radius: 8px; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.65; }
+.check { padding: 10px 12px; border-radius: 8px; background: var(--surface-2); margin: 8px 0; font-family: "JetBrains Mono", monospace; font-size: 14px; overflow-wrap: anywhere; }
+.reader-button { font: inherit; color: var(--accent); background: var(--surface-2); border: 1px solid var(--border); border-radius: 5px; padding: 4px 9px; cursor: pointer; }
+#read-task { margin-left: auto; }
+#reader { width: min(52rem, calc(100% - 24px)); max-height: calc(100% - 24px); padding: 0; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 10px; }
+#reader::backdrop { background: #000a; }
+.reader-head { display: flex; justify-content: space-between; gap: 16px; align-items: center; position: sticky; top: 0; padding: 14px 20px; background: var(--surface); border-bottom: 1px solid var(--border); z-index: 1; }
+.reader-head h2 { margin: 0; font-size: 18px; overflow-wrap: anywhere; }
+#reader-body { padding: 18px 20px; font-size: 17px; line-height: 1.75; overflow-wrap: anywhere; }
+#reader-body .tab { padding: 0; font: inherit; }
+.check.cross { border-left: 3px solid var(--ancestor); }
+.attempt { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; margin: 10px 0; }
+.attempt .v { font-weight: 600; }
+.attempt.PASS .v { color: var(--pass); } .attempt.FAIL .v { color: var(--fail); }
+.bt { color: var(--warn); font-weight: 500; }
+.empty { color: var(--muted); font-style: italic; }
+h3.sec { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 18px 0 6px; }
+.theme { position: absolute; top: 20px; right: 24px; }
+.theme button { font: inherit; font-size: 12px; background: var(--surface-2); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 4px 10px; cursor: pointer; }
+header { position: relative; }
+@media (max-width: 860px) {
+  header { padding: 16px; } .theme { top: 14px; right: 16px; }
+  h1 { font-size: 17px; padding-right: 64px; }
+  main { grid-template-columns: 1fr; }
+  #graph-wrap { border-right: none; border-bottom: 1px solid var(--border); padding: 12px 16px; }
+  .panel-head, .tab { padding-left: 16px; padding-right: 16px; }
+}
+@media (max-width: 540px) {
+  .call-header { grid-template-columns: 3ch minmax(0, 1fr); }
+  .call-meta { grid-column: 2; }
+}
+</style>
+</head>
+<body>
+<header>
+  <div class="eyebrow">黒紙 kurogami</div>
+  <h1 id="goal"></h1>
+  <div class="stats" id="stats"></div>
+  <div class="theme"><button id="theme-btn" type="button">Theme</button></div>
+</header>
+<main>
+  <section id="graph-wrap">
+    <h2 class="section-title">Run walkthrough</h2>
+    <div class="view-switch" aria-label="Task view">
+      <button type="button" id="show-steps" aria-pressed="true">Steps in order</button>
+      <button type="button" id="show-graph" aria-pressed="false">Dependency graph</button>
+    </div>
+    <div id="steps"></div>
+    <div id="graph-view" hidden>
+      <p class="meta">Read left to right. Drag the ⠿ grip up or down within a stage, or focus a card and press Alt+↑ or Alt+↓. Cards snap into order if dropped on one another.</p>
+      <div class="view-switch"><button type="button" id="reset-graph">Reset layout</button></div>
+      <div class="legend">
+        <span style="--c: var(--ancestor)">Required by this task</span>
+        <span style="--c: var(--descendant)">Uses this task</span>
+      </div>
+      <div id="graph" tabindex="0" aria-label="Dependency graph stages"></div>
+    </div>
+    <details id="call-stack"><summary id="call-count">Model call stack</summary><div id="calls"></div></details>
+  </section>
+  <aside id="panel">
+    <div class="panel-head">
+      <h2 id="p-title">Select a node</h2>
+      <div class="meta" id="p-meta">Click any node in the graph.</div>
+      <p class="goal" id="p-goal"></p>
+      <div class="meta" id="p-deps"></div>
+      <div class="tabs" role="tablist">
+        <button type="button" role="tab" data-tab="output" aria-selected="true">Output</button>
+        <button type="button" role="tab" data-tab="checks" aria-selected="false">Checks</button>
+        <button type="button" role="tab" data-tab="prompt" aria-selected="false">Prompt</button>
+        <button type="button" id="read-task" class="reader-button">Reading view</button>
+      </div>
+    </div>
+    <div class="tab active" id="tab-output"></div>
+    <div class="tab" id="tab-checks"></div>
+    <div class="tab" id="tab-prompt"></div>
+  </aside>
+</main>
+<dialog id="reader" aria-labelledby="reader-title">
+  <div class="reader-head"><h2 id="reader-title"></h2><form method="dialog"><button class="reader-button">Close</button></form></div>
+  <div id="reader-body"></div>
+</dialog>
+<script id="run-data" type="application/json">__RUN_DATA__</script>
+<script>
+(function () {
+  const data = JSON.parse(document.getElementById("run-data").textContent);
+  const snap = data.snapshot, specs = snap.specs, statuses = snap.statuses;
+  const attempts = data.attempts || {};
+  const formatted = data.formatted;
+  const reader = document.getElementById("reader");
+  const readerBody = document.getElementById("reader-body");
+  function openReader(title, content) {
+    document.getElementById("reader-title").textContent = title;
+    readerBody.replaceChildren(content);
+    reader.showModal();
+    reader.scrollTop = 0;
+  }
+  document.getElementById("read-task").onclick = () => {
+    const tab = document.querySelector(".tab.active");
+    const name = document.querySelector('.tabs [aria-selected="true"]').textContent;
+    const content = tab.cloneNode(true);
+    content.removeAttribute("id");
+    openReader(document.getElementById("p-title").textContent + " · " + name, content);
+  };
+  const calls = data.calls || [];
+  document.getElementById("call-count").textContent = `Model call stack (${calls.length})`;
+  for (const [index, call] of calls.entries()) {
+    const item = document.createElement("details");
+    item.className = "attempt";
+    const summary = document.createElement("summary");
+    summary.className = "call-header";
+    const stage = {
+      GoalSpec: "Interpret goal", _Scope: "Plan dependencies", _Blueprint: "Write task prompts",
+      _VerifyResponse: "Verify task", _LocaliseResponse: "Locate failure", _GapFill: "Plan missing prerequisite",
+    }[call.schema] || call.schema || "Execute task";
+    const tokens = (call.tokens_in || 0) + (call.tokens_out || 0);
+    for (const value of [call.seq, stage, call.error ? "Error" : `${tokens.toLocaleString()} tokens · ${call.wall_ms || 0} ms`]) {
+      const label = document.createElement("span");
+      label.textContent = value;
+      summary.append(label);
+    }
+    summary.lastChild.className = "call-meta";
+    const fields = document.createElement("div");
+    fields.className = "call-fields";
+    for (const [label, value] of [["Prompt", call.prompt], [call.error ? "Error" : "Response", call.error || call.text]]) {
+      const field = document.createElement("div");
+      const heading = document.createElement("h3");
+      heading.textContent = label;
+      const html = label === "Response" ? formatted.responses[index] : null;
+      const content = document.createElement(html ? "div" : "pre");
+      if (html) {
+        content.className = "md";
+        content.innerHTML = html;
+      } else content.textContent = value || "";
+      field.append(heading, content);
+      fields.append(field);
+    }
+    item.append(summary, fields);
+    const read = document.createElement("button");
+    read.type = "button";
+    read.className = "reader-button";
+    read.textContent = "Read model call";
+    read.onclick = () => openReader("Call " + call.seq + " · " + stage, fields.cloneNode(true));
+    item.append(read);
+    document.getElementById("calls").append(item);
+  }
+  const ids = Object.keys(specs);
+  const steps = document.createElement("ol");
+  steps.className = "steps-list";
+  document.getElementById("steps").append(steps);
+  const rows = ids.flatMap(id => (attempts[id] || []).map((attempt, index) => ({id, attempt, index})));
+  rows.sort((a, b) => a.attempt.sequence - b.attempt.sequence);
+  const stepButtons = [];
+  function addStep(id, attempt, index, number) {
+    const row = document.createElement("li");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "step-link";
+    button.onclick = () => selectTask(id, index);
+    const order = document.createElement("span");
+    order.className = "step-order";
+    order.textContent = number ?? "—";
+    const text = document.createElement("span");
+    const title = document.createElement("strong");
+    title.textContent = specs[id].title || id;
+    const status = document.createElement("span");
+    status.className = "step-state";
+    if (!attempt) status.textContent = statuses[id] === "skipped" ? "Skipped" : "No attempt recorded";
+    else if (attempt.verdict === "PASS") {
+      status.classList.add(statuses[id] === "invalidated" ? "warn" : "pass");
+      status.textContent = statuses[id] === "invalidated" ? "Passed, then invalidated" : "Passed";
+    } else {
+      status.classList.add("fail");
+      const target = attempt.backtrack_target;
+      status.textContent = !target ? "Failed" : target === id ? "Failed · Retried this step" :
+        "Failed · Went back to " + (specs[target]?.title || target);
+    }
+    text.append(title, status);
+    if (attempt?.failure_reason) {
+      const reason = document.createElement("span");
+      reason.className = "step-reason";
+      reason.textContent = attempt.failure_reason.length > 180
+        ? attempt.failure_reason.slice(0, 177) + "…" : attempt.failure_reason;
+      text.append(reason);
+    }
+    button.append(order, text);
+    row.append(button);
+    steps.append(row);
+    stepButtons.push({id, index, button});
+  }
+  rows.forEach(({id, attempt, index}, i) => addStep(id, attempt, index, i + 1));
+  ids.filter(id => !attempts[id]?.length).forEach(id => addStep(id, null, null));
+  if (!ids.length) steps.textContent = "The run stopped before any tasks were planned.";
+
+  // theme
+  const root = document.documentElement;
+  const saved = (() => { try { return localStorage.getItem("kg-theme"); } catch (e) { return null; } })();
+  if (saved) root.dataset.theme = saved;
+  document.getElementById("theme-btn").onclick = () => {
+    const dark = root.dataset.theme === "dark";
+    root.dataset.theme = dark ? "light" : "dark";
+    try { localStorage.setItem("kg-theme", root.dataset.theme); } catch (e) {}
+  };
+
+  // header
+  document.getElementById("goal").textContent = data.goal;
+  const count = s => Object.values(statuses).filter(x => x === s).length;
+  const fails = Object.values(attempts).flat().filter(a => a.verdict === "FAIL").length;
+  const realBt = (snap.backtrack_events || []).filter(e => e.target_node_id !== e.failing_node_id).length;
+  const tokens = Object.values(attempts).flat().reduce((t, a) => t + (a.tokens || 0), 0);
+  const stats = [
+    ["", `<b>${count("passed")}</b> passed`],
+    ["", `<b>${fails}</b> failed attempts`],
+    ["", `<b>${realBt}</b> backtracks`],
+    ["", `<b>${count("invalidated")}</b> thrown away`],
+    ["", `<b>${Object.keys(specs).length}</b> nodes`],
+  ];
+  if (tokens) stats.push(["", `<b>${tokens.toLocaleString()}</b> node tokens`]);
+  document.getElementById("stats").innerHTML =
+    stats.map(([c, t]) => `<span class="chip ${c}">${t}</span>`).join("");
+  const outcome = document.createElement("span");
+  outcome.className = data.outcome ? "chip bad" : "chip ok";
+  outcome.textContent = data.outcome || "✓ complete";
+  document.getElementById("stats").prepend(outcome);
+
+  // relationships
+  const parents = id => specs[id].parent_ids.filter(p => specs[p]);
+  const children = new Map(ids.map(id => [id, []]));
+  for (const id of ids) {
+    for (const parent of parents(id)) children.get(parent).push(id);
+  }
+
+  let current = null;
+  const cards = new Map();
+  const stageByTask = new Map();
+  const graph = document.getElementById("graph");
+  const canvas = document.createElement("div");
+  canvas.className = "graph-canvas";
+  const svgNS = "http://www.w3.org/2000/svg";
+  const arrows = document.createElementNS(svgNS, "svg");
+  arrows.classList.add("graph-edges");
+  arrows.setAttribute("aria-hidden", "true");
+  let drag = null;
+  const offsets = new Map();
+
+  function setOffset(card, offset) {
+    offsets.set(card, offset);
+    card.style.translate = offset ? `0 ${offset}px` : "";
+    if (current) highlight(current);
+  }
+
+  function placeCard(card, offset) {
+    const bounds = canvas.getBoundingClientRect();
+    const heading = card.parentElement.firstElementChild.getBoundingClientRect();
+    const rect = card.getBoundingClientRect();
+    const base = rect.top - (offsets.get(card) || 0);
+    setOffset(card, Math.max(heading.bottom + 6 - base,
+      Math.min(offset, bounds.bottom - 8 - rect.height - base)));
+  }
+
+  function finishDrag(card) {
+    const rect = card.getBoundingClientRect();
+    const siblings = [...card.parentElement.querySelectorAll(".graph-card")].filter(item => item !== card);
+    if (!siblings.some(item => {
+      const other = item.getBoundingClientRect();
+      return rect.top < other.bottom + 4 && rect.bottom > other.top - 4;
+    })) return;
+    const center = rect.top + rect.height / 2;
+    const next = siblings.find(item => {
+      const other = item.getBoundingClientRect();
+      return center < other.top + other.height / 2;
+    });
+    if (next) next.before(card);
+    else card.parentElement.append(card);
+    for (const item of [...siblings, card]) {
+      offsets.delete(item);
+      item.style.translate = "";
+    }
+    if (current) highlight(current);
+  }
+
+  canvas.addEventListener("pointermove", event => {
+    if (drag?.pointer !== event.pointerId) return;
+    placeCard(drag.card, drag.offset + event.clientY - drag.startY + graph.scrollTop - drag.scrollTop);
+  });
+  for (const eventName of ["pointerup", "pointercancel", "lostpointercapture"]) {
+    canvas.addEventListener(eventName, event => {
+      if (drag?.pointer !== event.pointerId) return;
+      const {card, offset} = drag;
+      drag = null;
+      card.classList.remove("dragging");
+      if (eventName === "pointerup") finishDrag(card);
+      else setOffset(card, offset);
+    });
+  }
+
+  function drawGraph() {
+    const columns = document.createElement("div");
+    columns.className = "graph-columns";
+    const depths = [...new Set(ids.map(id => specs[id].depth))].sort((a, b) => a - b);
+    for (const [index, depth] of depths.entries()) {
+      const column = document.createElement("section");
+      column.className = "graph-column";
+      const heading = document.createElement("h3");
+      heading.textContent = "Stage " + (index + 1);
+      column.append(heading);
+      for (const id of ids.filter(id => specs[id].depth === depth)) {
+        stageByTask.set(id, index);
+        const card = document.createElement("button");
+        card.type = "button";
+        card.className = "graph-card";
+        card.dataset.status = statuses[id];
+        card.textContent = specs[id].title || id;
+        card.setAttribute("aria-keyshortcuts", "Alt+ArrowUp Alt+ArrowDown");
+        const grip = document.createElement("span");
+        grip.className = "graph-grip";
+        grip.textContent = "⠿";
+        grip.title = "Drag up or down";
+        grip.setAttribute("aria-hidden", "true");
+        grip.onpointerdown = event => {
+          if (event.button !== 0 || drag) return;
+          selectTask(id);
+          card.classList.add("dragging");
+          drag = {card, pointer: event.pointerId, startY: event.clientY,
+            scrollTop: graph.scrollTop, offset: offsets.get(card) || 0};
+          canvas.setPointerCapture(event.pointerId);
+          event.preventDefault();
+        };
+        const status = document.createElement("small");
+        status.textContent = {
+          passed: "Passed", failed: "Failed", pending: "Pending", skipped: "Skipped",
+          invalidated: "Invalidated", running: "Running",
+        }[statuses[id]] || statuses[id];
+        card.append(status, grip);
+        card.onclick = () => selectTask(id);
+        card.onkeydown = event => {
+          if (!event.altKey || !["ArrowUp", "ArrowDown"].includes(event.key)) return;
+          event.preventDefault();
+          const direction = event.key === "ArrowUp" ? -1 : 1;
+          placeCard(card, (offsets.get(card) || 0) + direction * 16);
+          finishDrag(card);
+          card.focus({preventScroll: true});
+        };
+        cards.set(id, card);
+        column.append(card);
+      }
+      columns.append(column);
+    }
+    // Reserve space above the cards for links that jump over a stage.
+    const maxJumps = Math.max(0, ...ids.map(id =>
+      [...parents(id), ...children.get(id)].filter(other =>
+        Math.abs(stageByTask.get(id) - stageByTask.get(other)) > 1
+      ).length
+    ));
+    columns.style.paddingTop = (maxJumps ? 8 + 8 * maxJumps : 0) + "px";
+    canvas.append(columns, arrows);
+    graph.append(canvas);
+  }
+
+  function highlight(id) {
+    const inputs = new Set(parents(id));
+    const outputs = new Set(children.get(id));
+    for (const [task, card] of cards) {
+      card.classList.toggle("selected", task === id);
+      card.classList.toggle("input", inputs.has(task));
+      card.classList.toggle("output", outputs.has(task));
+      card.classList.toggle("unrelated", task !== id && !inputs.has(task) && !outputs.has(task));
+      card.setAttribute("aria-pressed", String(task === id));
+    }
+    if (document.getElementById("graph-view").hidden) return;
+    arrows.replaceChildren();
+    const bounds = canvas.getBoundingClientRect();
+    const byPosition = (a, b) =>
+      cards.get(a).getBoundingClientRect().top - cards.get(b).getBoundingClientRect().top ||
+      stageByTask.get(a) - stageByTask.get(b);
+    const incoming = [...inputs].sort(byPosition);
+    const outgoing = [...outputs].sort(byPosition);
+    const port = (card, index, count) => card.top - bounds.top + 10 +
+      (card.height - 20) * (index + 1) / (count + 1);
+    let jump = 0;
+    const routes = [
+      ...incoming.map((parent, index) => ({from: parent, to: id, index, count: incoming.length, input: true})),
+      ...outgoing.map((child, index) => ({from: id, to: child, index, count: outgoing.length, input: false})),
+    ];
+    for (const {from, to, index, count, input} of routes) {
+      const a = cards.get(from).getBoundingClientRect();
+      const b = cards.get(to).getBoundingClientRect();
+      const x1 = a.right - bounds.left, y1 = port(a, input ? 0 : index, input ? 1 : count);
+      const x2 = b.left - bounds.left, y2 = port(b, input ? index : 0, input ? count : 1);
+      const lane = 12 + 28 * (index + 1) / (count + 1);
+      const bend = input ? x2 - lane : x1 + lane;
+      const skipsStage = stageByTask.get(to) - stageByTask.get(from) > 1;
+      const top = skipsStage ? 9 + 8 * jump++ : 0;
+      const route = skipsStage
+        ? `M${x1},${y1} H${x1 + lane} V${top} H${x2 - lane} V${y2} H${x2}`
+        : `M${x1},${y1} H${bend} V${y2} H${x2}`;
+      const color = input ? "var(--ancestor)" : "var(--descendant)";
+      const line = document.createElementNS(svgNS, "path");
+      line.setAttribute("d", route);
+      line.setAttribute("fill", "none");
+      line.setAttribute("stroke", color);
+      line.setAttribute("stroke-width", "2");
+      const tip = document.createElementNS(svgNS, "path");
+      tip.setAttribute("d", "M" + (x2 - 7) + "," + (y2 - 4) + " L" + x2 + "," + y2 + " L" + (x2 - 7) + "," + (y2 + 4));
+      tip.setAttribute("fill", "none");
+      tip.setAttribute("stroke", color);
+      arrows.append(line, tip);
+    }
+  }
+  drawGraph();
+  document.getElementById("reset-graph").onclick = () => {
+    for (const card of cards.values()) {
+      card.parentElement.append(card);
+      card.style.translate = "";
+    }
+    offsets.clear();
+    if (current) highlight(current);
+  };
+  new ResizeObserver(() => { if (current) highlight(current); }).observe(canvas);
+  const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+  function selectTask(id, attemptIndex = null) {
+    current = id; highlight(id);
+    history.replaceState(null, "", "#node=" + encodeURIComponent(id));
+    const s = specs[id], tries = attempts[id] || [];
+    document.getElementById("p-title").textContent = s.title || id;
+    document.getElementById("p-meta").textContent =
+      `${id} · ${s.kind} · depth ${s.depth} · ${statuses[id]}` + (parents(id).length ? ` · builds on ${parents(id).join(", ")}` : "");
+    document.getElementById("p-goal").textContent = s.node_goal;
+    for (const step of stepButtons) {
+      if (step.id === id && step.index === attemptIndex) step.button.setAttribute("aria-current", "step");
+      else step.button.removeAttribute("aria-current");
+    }
+    const deps = document.getElementById("p-deps");
+    deps.replaceChildren();
+    const prerequisiteIds = parents(id);
+    if (prerequisiteIds.length) deps.append("Depends on ");
+    for (const parent of prerequisiteIds) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = specs[parent].title || parent;
+      button.onclick = () => selectTask(parent);
+      deps.append(button);
+    }
+    const selectedAttempt = attemptIndex === null ? null : tries[attemptIndex];
+    const attemptOutput = formatted.attempts[id] || [];
+    const out = selectedAttempt ? attemptOutput[attemptIndex] :
+      formatted.results[id] ?? attemptOutput.at(-1);
+    document.getElementById("tab-output").innerHTML = out ? `<div class="md">${out}</div>` : `<p class="empty">This node did not run.</p>`;
+    const checks = (s.pass_condition.assertions || []).map(a =>
+      `<div class="check ${a.includes("ancestors") ? "cross" : ""}">${esc(a)}</div>`).join("") || `<p class="empty">No deterministic checks.</p>`;
+    const tri = tries.map((t, i) => `<div class="attempt ${t.verdict}"><span class="v">Attempt ${i + 1}: ${t.verdict}</span>` +
+      (t.failure_reason ? `<div>${esc(t.failure_reason)}</div>` : "") +
+      (t.backtrack_target ? `<div class="bt">↩ ${t.backtrack_target === id ? "retried itself" : "backtracked to " + esc(t.backtrack_target)}</div>` : "") +
+      `</div>`).join("");
+    document.getElementById("tab-checks").innerHTML =
+      `<h3 class="sec">Deterministic checks</h3>${checks}` +
+      `<h3 class="sec">Verifier question</h3><p>${esc(s.pass_condition.semantic_check)}</p>` +
+      (tri ? `<h3 class="sec">Attempts</h3>${tri}` : "");
+    const cons = (s.injected_constraints || []).map(c => `<li>${esc(c)}</li>`).join("");
+    document.getElementById("tab-prompt").innerHTML = `<pre>${esc(s.generated_prompt)}</pre>` +
+      (cons ? `<h3 class="sec">Human constraints</h3><ul>${cons}</ul>` : "");
+    if (selectedAttempt) {
+      document.querySelector('[data-tab="' + (selectedAttempt.verdict === "FAIL" ? "checks" : "output") + '"]').click();
+    }
+  }
+
+  document.querySelectorAll(".tabs [data-tab]").forEach(b => b.onclick = () => {
+    document.querySelectorAll(".tabs [data-tab]").forEach(x => x.setAttribute("aria-selected", x === b));
+    document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.id === "tab-" + b.dataset.tab));
+  });
+
+  const showSteps = document.getElementById("show-steps");
+  const showGraph = document.getElementById("show-graph");
+  function setView(graph) {
+    document.getElementById("steps").hidden = graph;
+    document.getElementById("graph-view").hidden = !graph;
+    showSteps.setAttribute("aria-pressed", String(!graph));
+    showGraph.setAttribute("aria-pressed", String(graph));
+    if (graph && current) {
+      highlight(current);
+      cards.get(current)?.scrollIntoView({block: "nearest", inline: "nearest"});
+    }
+  }
+  showSteps.onclick = () => setView(false);
+  showGraph.onclick = () => setView(true);
+  const linked = new URLSearchParams(location.hash.slice(1)).get("node");
+  const lastFailure = rows.filter(row => row.attempt.verdict === "FAIL").at(-1);
+  const decision = ids.find(id => specs[id].kind === "decision" && statuses[id] === "passed");
+  if (ids.includes(linked)) selectTask(linked);
+  else if (data.outcome && lastFailure) selectTask(lastFailure.id, lastFailure.index);
+  else if (decision) selectTask(decision);
+  else if (ids.length) selectTask(ids[0]);
+})();
+</script>
+</body>
+</html>

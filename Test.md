@@ -27,7 +27,15 @@ To test human input, copy a node ID from the live graph and add `--interrupt-at 
 
 ## Offline fallback for the demo
 
-Extract the offline demo ZIP into the project folder so `endsem-demo/goal.json` exists. These commands run without API keys. They show the runner using saved responses.
+The archived bundle is checked in under `endsem-demo/`. Its response cache was recorded on commit `ab557ef`, before the Textual planner changes. For the current build, open the archived execution traces without API keys:
+
+```sh
+kurogami open-trace endsem-demo/invoicing/trace/recorded-run.jsonl
+kurogami open-trace endsem-demo/recovery/trace/2bec5691-8ccc-4f6b-8cc8-00995dab2d2f.jsonl
+kurogami open-trace endsem-demo/interrupt/trace/36c6b48d-c331-4c46-b7d7-40079ddfd0be.jsonl
+```
+
+The commands below execute the original cached workflows on commit `ab557ef`. The newer prompts on `main` need a fresh cache to execute offline.
 
 1. **Complete a goal**
    ```sh

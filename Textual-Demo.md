@@ -60,4 +60,4 @@ The live tutor rehearsal is also saved in **Recent runs**. Open it directly with
 kurogami tui --open traces/textual-live-simple/348d847f-8aa8-481e-a1f5-12ad4c996548.snapshot.json
 ```
 
-The HTML can show a task list and the call stack offline. Its graphical layout uses browser libraries loaded over the internet.
+The HTML shows the dependency graph, task details, and model call stack offline.

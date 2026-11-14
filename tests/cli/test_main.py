@@ -110,8 +110,12 @@ def _fake(scope: dict | None = None, blueprint: dict | None = None) -> _SchemaFa
             "GoalSpec": _goal_dict(),
             "_Scope": scope or _scope(),
             "_Blueprint": blueprint or _blueprint(),
-            "_VerifyResponse": {"verdict": "PASS", "reason": None},
+            "_VerifyResponse": {"checked_claims": [], "verdict": "PASS", "reason": None},
             "_GapFill": {"node": None},
+            "_CheckReview": {
+                "check_is_wrong": False, "explanation": "the answer falls short",
+                "replacement_assertions": [],
+            },
         }
     )
 
@@ -223,9 +227,10 @@ def test_open_trace_exports_latest_run_with_all_parents_and_calls(tmp_path, use_
     [page] = opened
     html = page.read_text(encoding="utf-8")
     assert RAW_TEXT in html
-    assert 'aria-label="Task dependency graph"' in html
-    assert '<a href="#task-a3">a3</a>, <a href="#task-c2">c2</a>' in html
-    assert "Model call stack (23)" in html
+    payload = html.split('<script id="run-data" type="application/json">', 1)[1]
+    saved = json.loads(payload.split("</script>", 1)[0])
+    assert saved["snapshot"]["specs"]["final"]["parent_ids"] == ["a3", "c2"]
+    assert len(saved["calls"]) == 23
 
     result = runner.invoke(app, ["open-trace", "--trace-dir", str(tmp_path), "--no-browser"])
     assert result.exit_code == 0, result.output
@@ -396,3 +401,18 @@ def test_replay_command_renders_the_trace_offline(tmp_path):
 
     assert result.exit_code == 0
     assert "n_a" in result.stdout
+
+
+def test_a_question_can_be_asked_directly_with_goal(use_llm, tmp_path):
+    use_llm(_fake())
+    result = CliRunner().invoke(
+        cli_main.app,
+        ["run", "--goal", "Should I launch my yoga app in Pune?", "--llm", "fake",
+         "--trace-dir", str(tmp_path)],
+    )
+    assert result.exit_code == 0, result.stdout
+
+
+def test_goal_and_goal_file_are_mutually_exclusive(tmp_path):
+    result = CliRunner().invoke(cli_main.app, ["run", "--llm", "fake", "--trace-dir", str(tmp_path)])
+    assert result.exit_code != 0

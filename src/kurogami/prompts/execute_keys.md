@@ -6,6 +6,9 @@ Python expressions, so each value must have the type and shape they imply (e.g. 
 list where len(...) is compared to a count, a number where it is compared to a
 number):
 {checks}
+These checks are binding: your answer fails if any of them is False. If you believe
+one of them is wrong for this situation, still meet it, and say in your prose why
+you disagree -- a reviewer reads that.
 Example layout:
 ```json
 {example}

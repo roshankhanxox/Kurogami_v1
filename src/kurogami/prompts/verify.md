@@ -15,6 +15,15 @@ The question to answer, written by the planner when this node was created.
 This -- and only this -- is what determines PASS or FAIL:
 {semantic_check}
 
+Before deciding, fill checked_claims: pick the two to four figures or factual
+claims in the output that matter most to the question above, and for each write
+one line saying what the output claims, what the ancestor context (or the cited
+source) says, and whether they agree -- e.g. "price INR 799/month vs ceiling INR
+500/month in market_sizing: exceeds". If the output relies on a figure that
+measures something broader than what it is used for (a whole-market total used
+as this product's market, say), note that too. For a root node, check the
+figures against the sources it cites.
+
 Rules, all mandatory:
 
 1. Judge only whether the output answers the question above. Do not invent
@@ -39,4 +48,4 @@ Rules, all mandatory:
    ancestor is responsible, leave suspect_node_ids empty.
 4. evidence must quote the specific contradicting text, not a paraphrase.
 
-Return only the verdict and, if FAILing, the reason.
+Return checked_claims, the verdict and, if FAILing, the reason.

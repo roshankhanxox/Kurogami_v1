@@ -13,11 +13,14 @@ from typing import Protocol
 
 from kurogami.agents.planner import BlueprintError
 from kurogami.contracts import (
+    BacktrackEvent,
+    FailureReason,
     GoalSpec,
     InterruptPort,
     NodeResult,
     NodeSpec,
     NodeStatus,
+    PassCondition,
     TraceRecord,
     TraceSink,
     TreeSnapshot,
@@ -51,6 +54,51 @@ class Verifier(Protocol):
     def check(self, node: NodeSpec, result: NodeResult, context: dict[str, str]) -> Verdict: ...
 
 
+class Localiser(Protocol):
+    def localise(
+        self, node: NodeSpec, result: NodeResult, reason: FailureReason, context: dict[str, str]
+    ) -> FailureReason: ...
+
+
+class CheckReviser(Protocol):
+    def revise_check(
+        self, node: NodeSpec, result: NodeResult, reason: FailureReason
+    ) -> PassCondition | None: ...
+
+
+class RunObserver(Protocol):
+    """Watches a run as it happens, e.g. a live UI. May block (a plan review waits for a human).
+
+    Engine-local rather than the frozen RunnerHooks contract: a live view also
+    needs the planned tree before anything runs, and the whole snapshot each time.
+    """
+
+    def on_planned(self, snapshot: TreeSnapshot) -> None: ...
+    def on_node_started(self, node: NodeSpec, snapshot: TreeSnapshot) -> None: ...
+    def on_node_finished(
+        self, node: NodeSpec, result: NodeResult, verdict: Verdict, snapshot: TreeSnapshot
+    ) -> None: ...
+    def on_backtrack(self, event: BacktrackEvent, snapshot: TreeSnapshot) -> None: ...
+
+
+class NullObserver:
+    """Observes nothing: the default for batch runs and tests."""
+
+    def on_planned(self, snapshot: TreeSnapshot) -> None:
+        pass
+
+    def on_node_started(self, node: NodeSpec, snapshot: TreeSnapshot) -> None:
+        pass
+
+    def on_node_finished(
+        self, node: NodeSpec, result: NodeResult, verdict: Verdict, snapshot: TreeSnapshot
+    ) -> None:
+        pass
+
+    def on_backtrack(self, event: BacktrackEvent, snapshot: TreeSnapshot) -> None:
+        pass
+
+
 @dataclass
 class RunReport:
     """What a caller (CLI, bench harness) reads after a run. Not a frozen contract."""
@@ -77,6 +125,9 @@ class Runner:
         interrupt: InterruptPort,
         trace_sink: TraceSink,
         budget: Budget | None = None,
+        localiser: Localiser | None = None,
+        observer: RunObserver | None = None,
+        check_reviser: CheckReviser | None = None,
     ) -> None:
         self._interpreter = interpreter
         self._planner = planner
@@ -86,6 +137,9 @@ class Runner:
         self._interrupt = interrupt
         self._trace_sink = trace_sink
         self._budget = budget or Budget()
+        self._localiser = localiser
+        self._observer: RunObserver = observer or NullObserver()
+        self._check_reviser = check_reviser
 
     def run(self, raw_goal: str) -> RunReport:
         run_id = uuid.uuid4()
@@ -100,7 +154,9 @@ class Runner:
         for planned in blueprint:
             self._record_created(planned)
         store.seed_blueprint(blueprint)
+        self._observer.on_planned(store.snapshot())
         gave_up: dict[str, str] = {}
+        checks_revised: set[str] = set()
 
         while store.has_pending() and self._budget.ok():
             node = scheduler.next(store)
@@ -129,6 +185,7 @@ class Runner:
             store.update_spec(node)
 
             store.mark_running(node.node_id)
+            self._observer.on_node_started(node, store.snapshot())
             result = self._executor.run(node)
             self._budget.record_tokens(result.tokens_in, result.tokens_out)
 
@@ -136,6 +193,16 @@ class Runner:
             if verdict.verdict == "PASS":
                 verdict = self._verifier.check(node, result, node.context).model_copy(
                     update={"checked_by": "both"}
+                )
+            elif self._localiser is not None and verdict.reason is not None:
+                # A rule can prove a contradiction with an ancestor but not whose fault
+                # it is; without this, every deterministic FAIL blamed the node itself.
+                verdict = verdict.model_copy(
+                    update={
+                        "reason": self._localiser.localise(
+                            node, result, verdict.reason, node.context
+                        )
+                    }
                 )
 
             seq += 1
@@ -151,18 +218,48 @@ class Runner:
                 store.mark_failed(node.node_id)
                 assert verdict.reason is not None  # a FAIL verdict always carries a reason
                 blamed_id = backtrack.locate(verdict.reason, store, node.node_id)
-                if blamed_id == node.node_id and not self._budget.record_node_retry(node.node_id):
+                revised = None
+                out_of_retries = blamed_id == node.node_id and not self._budget.record_node_retry(
+                    node.node_id
+                )
+                if (
+                    out_of_retries
+                    and verdict.checked_by == "rules"
+                    and self._check_reviser is not None
+                    and node.node_id not in checks_revised
+                ):
+                    # Every attempt failed the same deterministic check: ask the Master,
+                    # who wrote it, whether the check is what's wrong. Once per node.
+                    checks_revised.add(node.node_id)
+                    revised = self._check_reviser.revise_check(node, result, verdict.reason)
+                if revised is not None:
+                    store.update_spec(node.model_copy(update={"pass_condition": revised}))
+                    event = backtrack.apply(
+                        store,
+                        node.node_id,
+                        FailureReason(
+                            summary="The planner judged the check this node kept failing to "
+                            "be wrong and replaced it; answer on the merits.",
+                            violated="assertion",
+                            evidence=verdict.reason.evidence,
+                        ),
+                    )
+                    backtrack_target = event.target_node_id
+                    self._observer.on_backtrack(event, store.snapshot())
+                elif out_of_retries:
                     # Out of its own retries: it stays FAILED and the rest of the tree
                     # keeps running (seen live: one node burned the whole run).
                     gave_up[node.node_id] = verdict.reason.summary
                 else:
                     event = backtrack.apply(store, node.node_id, verdict.reason)
                     backtrack_target = event.target_node_id
+                    self._observer.on_backtrack(event, store.snapshot())
                     # A node blaming itself is retrying, not backtracking to an ancestor;
                     # only real backtracks spend the run-wide allowance.
                     if backtrack_target != node.node_id:
                         self._budget.record_backtrack()
 
+            self._observer.on_node_finished(node, result, verdict, store.snapshot())
             self._trace_sink.emit(
                 TraceRecord(
                     run_id=run_id,

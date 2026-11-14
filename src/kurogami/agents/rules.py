@@ -11,6 +11,13 @@ bound.
 import ast
 from typing import Any, Literal
 
+from kurogami.agents._structured import (
+    ANCESTORS_NAME,
+    ancestor_payloads,
+    describe_values,
+    required_structured_keys,
+    resolved_ancestor_values,
+)
 from kurogami.contracts import FailureReason, NodeResult, NodeSpec, Verdict
 
 # Pure, side-effect-free builtins only. The type names are here so isinstance()
@@ -36,7 +43,11 @@ _SAFE_BUILTINS: dict[str, Any] = {
     "isinstance": isinstance,
 }
 ALLOWED_FUNCTIONS = tuple(_SAFE_BUILTINS)
-_ALLOWED_NAMES = frozenset({"structured", "context", *_SAFE_BUILTINS})
+# `ancestors` maps each ancestor id to its structured payload, so a check can compare
+# this node's figures against an earlier node's (e.g. a price against a ceiling). Seen
+# live: with only shape checks available, 57 of 57 verdicts were PASS and no
+# contradiction could ever be caught deterministically.
+_ALLOWED_NAMES = frozenset({"structured", "context", ANCESTORS_NAME, *_SAFE_BUILTINS})
 _ALLOWED_CALL_NAMES = frozenset(_SAFE_BUILTINS)
 
 _ALLOWED_NODE_TYPES = (
@@ -147,6 +158,7 @@ def _safe_eval(expression: str, structured: dict[str, Any], context: dict[str, s
         "__builtins__": {},
         "structured": structured,
         "context": context,
+        ANCESTORS_NAME: ancestor_payloads(context),
         **_SAFE_BUILTINS,
     }
     return bool(eval(compiled, safe_globals))
@@ -169,14 +181,33 @@ class RuleChecker:
             except (
                 TypeError, KeyError, IndexError, ValueError, ZeroDivisionError, AttributeError
             ) as exc:
+                # Seen live: "'>=' not supported between 'str' and 'int'" alone never
+                # told the retry which value was wrong; three retries repeated it.
+                actual = describe_values(assertion, result.structured)
                 return self._fail(
-                    node, "assertion", f"assertion raised {type(exc).__name__}: {exc}", assertion
+                    node,
+                    "assertion",
+                    f"assertion raised {type(exc).__name__}: {exc}"
+                    + (f" (your output: {actual})" if actual else ""),
+                    assertion,
                 )
             if not passed:
                 return self._fail(
-                    node, "assertion", f"assertion evaluated to False: {assertion}", assertion
+                    node,
+                    "assertion",
+                    f"assertion evaluated to False: {assertion}",
+                    self._evidence(assertion, result, node.context),
                 )
         return Verdict(node_id=node.node_id, verdict="PASS", checked_by="rules")
+
+    @staticmethod
+    def _evidence(assertion: str, result: NodeResult, context: dict[str, str]) -> str:
+        """The assertion plus the values it compared, so a retry knows what to change."""
+        compared = resolved_ancestor_values([assertion], context)
+        if not compared:
+            return assertion
+        own = {k: result.structured.get(k) for k in required_structured_keys([assertion])}
+        return f"{assertion}; with {'; '.join(compared)}; this node reported {own}"
 
     @staticmethod
     def _fail(

@@ -198,3 +198,23 @@ def test_assertions_without_keys_are_shown_without_an_empty_key_list():
     Executor(llm).run(node)
     assert "len(context) >= 0" in llm.last_prompt
     assert "exactly these keys" not in llm.last_prompt
+
+
+def test_executor_shows_the_ancestor_values_its_checks_compare_against():
+    check = "structured['price_inr'] <= ancestors['wtp']['max_price_inr']"
+    node = _node(
+        pass_condition=PassCondition(assertions=[check], semantic_check="?"),
+        context={"wtp": 'prose\n```json\n{"max_price_inr": 500}\n```'},
+    )
+    llm = _CapturingLLM()
+    Executor(llm).run(node)
+    assert "ancestors['wtp']['max_price_inr'] = 500" in llm.last_prompt
+
+
+def test_only_the_decision_node_is_asked_to_carry_figures_through():
+    llm = _CapturingLLM()
+    Executor(llm).run(_node(kind=NodeKind.ANALYSIS))
+    assert "final decision" not in llm.last_prompt
+    Executor(llm).run(_node(kind=NodeKind.DECISION))
+    assert "final decision" in llm.last_prompt
+    assert llm.last_prompt.rstrip().endswith("Do not\nlist things you can reasonably estimate yourself.")
