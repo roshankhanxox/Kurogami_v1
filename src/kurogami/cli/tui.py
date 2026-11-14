@@ -10,7 +10,6 @@ exists.
 import logging
 import threading
 import time
-import webbrowser
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -36,7 +35,7 @@ from textual.widgets import (
 )
 from textual.widgets.tree import TreeNode
 
-from kurogami.cli.export import export_run
+from kurogami.cli.export import export_run, open_browser
 from kurogami.contracts import (
     BacktrackEvent,
     NodeKind,
@@ -218,6 +217,36 @@ class _Bridge:
         return answer[0] or []
 
 
+class OutputScreen(ModalScreen[None]):
+    """Read a long answer with the full terminal width."""
+
+    DEFAULT_CSS = """
+    OutputScreen { background: $surface; }
+    #reader-title { height: auto; padding: 0 2; text-style: bold; }
+    #reader-scroll { height: 1fr; padding: 0 2; }
+    #reader-scroll MarkdownFence { overflow-x: hidden; }
+    #reader-scroll MarkdownFence > Label { width: 1fr; text-wrap: wrap; text-overflow: fold; }
+    """
+    BINDINGS = [Binding("escape", "close", "Back")]  # noqa: RUF012
+
+    def __init__(self, title: str, output: str) -> None:
+        super().__init__()
+        self._title = title
+        self._output = output
+
+    def compose(self) -> ComposeResult:
+        yield Static(Text(self._title), id="reader-title")
+        with VerticalScroll(id="reader-scroll"):
+            yield Markdown(self._output)
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.query_one("#reader-scroll", VerticalScroll).focus()
+
+    def action_close(self) -> None:
+        self.dismiss()
+
+
 class RunScreen(Screen[RunReport | None]):
     """Live view of one run, or a browser over a finished one."""
 
@@ -228,6 +257,10 @@ class RunScreen(Screen[RunReport | None]):
     #detail { width: 55%; }
     #node-head { height: auto; padding: 0 1; background: $boost; }
     #status { height: 1; padding: 0 1; background: $panel; }
+    #tabs { height: 1fr; }
+    #output-scroll { height: 1fr; }
+    #output-scroll MarkdownFence { overflow-x: hidden; }
+    #output-scroll MarkdownFence > Label { width: 1fr; text-wrap: wrap; text-overflow: fold; }
     TabPane { padding: 0 1; }
     """
     BINDINGS = [  # noqa: RUF012 -- Textual reads this class attribute
@@ -235,6 +268,7 @@ class RunScreen(Screen[RunReport | None]):
         Binding("p", "toggle_pause", "Pause here"),
         Binding("c", "constrain", "Add constraint"),
         Binding("a", "answer", "Final answer"),
+        Binding("f", "full_output", "Full output"),
         Binding("e", "export", "Open graph in browser"),
         Binding("escape", "back", "Back"),
     ]
@@ -273,7 +307,7 @@ class RunScreen(Screen[RunReport | None]):
             with Vertical(id="detail"):
                 yield Static("Select a node.", id="node-head")
                 with TabbedContent(id="tabs"):
-                    with TabPane("Output", id="tab-output"), VerticalScroll():
+                    with TabPane("Output", id="tab-output"), VerticalScroll(id="output-scroll"):
                         yield Markdown("", id="output")
                     with TabPane("Prompt", id="tab-prompt"), VerticalScroll():
                         yield Static("", id="prompt")
@@ -556,6 +590,22 @@ class RunScreen(Screen[RunReport | None]):
             tree.call_after_refresh(tree.move_cursor, self._tree_nodes[decisions[-1]])
             self._show(decisions[-1])
             self.query_one("#tabs", TabbedContent).active = "tab-output"
+            output_scroll = self.query_one("#output-scroll", VerticalScroll)
+            output_scroll.scroll_home(animate=False)
+            output_scroll.focus()
+
+    def action_full_output(self) -> None:
+        snapshot = self.state.snapshot
+        node_id = self._shown
+        if snapshot is None or node_id is None:
+            self.notify("Select a task to read its output.")
+            return
+        attempts = self.state.attempts.get(node_id, [])
+        result = snapshot.results.get(node_id) or (attempts[-1].result if attempts else None)
+        if result is None:
+            self.notify("This task has no output yet.")
+            return
+        self.app.push_screen(OutputScreen(snapshot.specs[node_id].title, result.output))
 
     def on_unmount(self) -> None:
         """However the screen closes -- Esc, q, Ctrl+C, an error -- release the runner's thread.
@@ -563,14 +613,16 @@ class RunScreen(Screen[RunReport | None]):
         Seen in a live session: the app closed while a pause dialog was open, the
         runner thread waited on it forever, and the process never exited.
         """
+        self.request_cancel()
+
+    def request_cancel(self) -> None:
         self.cancelled.set()
         self.go.set()
 
     def action_back(self) -> None:
         if self._start_run is not None and self.state.phase != "finished":
             self.notify("Stopping the run after the current LLM call.", severity="warning")
-        self.cancelled.set()
-        self.go.set()
+        self.request_cancel()
         self.dismiss(self.report)
 
     def action_export(self) -> None:
@@ -578,15 +630,20 @@ class RunScreen(Screen[RunReport | None]):
             self.notify("The graph can be exported once the run has finished.")
             return
         page = export_run(self.snapshot_path)
-        webbrowser.open(page.resolve().as_uri())
-        self.notify(f"Opened {page.name} in your browser.")
+        if open_browser(page):
+            self.notify(f"Opened {page.name} in your browser.")
+        else:
+            self.notify(f"Open this file in your browser: {page.resolve()}", timeout=15)
 
 
 class KurogamiApp(App[RunReport | None]):
     """One run, full screen: `kurogami tui` and the tests."""
 
     TITLE = "kurogami"
-    BINDINGS = [Binding("q", "quit", "Quit")]  # noqa: RUF012 -- Textual reads this class attribute
+    BINDINGS = [  # noqa: RUF012
+        Binding("ctrl+q", "quit", "Quit", priority=True),
+        Binding("q", "quit", "Quit", show=False),
+    ]
 
     def __init__(self, goal: str, **run_screen_args: Any) -> None:
         super().__init__()
@@ -596,6 +653,5 @@ class KurogamiApp(App[RunReport | None]):
         self.push_screen(self.run_screen, self.exit)
 
     async def action_quit(self) -> None:
-        self.run_screen.cancelled.set()
-        self.run_screen.go.set()
+        self.run_screen.request_cancel()
         self.exit(self.run_screen.report)

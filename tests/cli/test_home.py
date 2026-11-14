@@ -58,6 +58,31 @@ def test_typing_a_question_runs_it_and_escape_comes_home(tmp_path):
     assert asked == ["Should I launch my yoga app?"]
 
 
+def test_ctrl_q_quits_from_home_and_releases_plan_review(tmp_path):
+    async def scenario():
+        app = HomeApp(_settings(tmp_path), _factory([]))
+        async with app.run_test() as pilot:
+            await _until(pilot, lambda: isinstance(app.screen, HomeScreen))
+            await pilot.press("ctrl+q")
+            await _until(pilot, lambda: not app.is_running)
+
+        settings = _settings(tmp_path)
+        settings.review = True
+        app = HomeApp(settings, _factory([]))
+        async with app.run_test() as pilot:
+            await _until(pilot, lambda: isinstance(app.screen, HomeScreen))
+            app.screen.query_one("#ask", Input).value = "Should I launch?"
+            await pilot.press("enter")
+            await _until(pilot, lambda: isinstance(app.screen, RunScreen))
+            screen = app.screen
+            await _until(pilot, lambda: screen.state.snapshot is not None)
+            await pilot.press("ctrl+q")
+            assert screen.cancelled.is_set()
+            assert screen.go.is_set()
+
+    asyncio.run(scenario())
+
+
 def test_slash_commands_change_the_settings(tmp_path):
     settings = _settings(tmp_path)
 
@@ -111,6 +136,29 @@ def test_a_listed_run_opens_offline(tmp_path):
             assert app.screen.snapshot_path == snapshot
 
     asyncio.run(scenario())
+
+
+def test_e_exports_the_saved_run_from_the_results_screen(tmp_path, monkeypatch):
+    from tests.cli.test_export import _write_run
+
+    _write_run(tmp_path)
+    opened = []
+    monkeypatch.setattr("kurogami.cli.tui.open_browser", lambda page: opened.append(page) or True)
+
+    async def scenario():
+        app = HomeApp(_settings(tmp_path), _factory([]))
+        async with app.run_test() as pilot:
+            await _until(pilot, lambda: isinstance(app.screen, HomeScreen))
+            runs = app.screen.query_one("#runs", OptionList)
+            runs.focus()
+            runs.highlighted = 0
+            await pilot.press("enter")
+            await _until(pilot, lambda: isinstance(app.screen, RunScreen))
+            await pilot.press("e")
+
+    asyncio.run(scenario())
+    assert opened == [tmp_path / "run.html"]
+    assert opened[0].is_file()
 
 
 def test_token_budgets_read_like_people_write_them():

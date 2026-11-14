@@ -2,9 +2,10 @@
 
 import asyncio
 
+from textual.containers import VerticalScroll
 from textual.widgets import TextArea, Tree
 
-from kurogami.cli.tui import ConstraintScreen, KurogamiApp, primary_parent
+from kurogami.cli.tui import ConstraintScreen, KurogamiApp, OutputScreen, primary_parent
 from kurogami.contracts import (
     GoalSpec,
     NodeKind,
@@ -157,6 +158,39 @@ def test_a_finished_run_opens_offline_on_the_final_answer():
         async with app.run_test() as pilot:
             await pilot.pause(0.2)
             assert app.run_screen._shown == "d"
+
+    asyncio.run(scenario())
+
+
+def test_the_full_output_reader_scrolls_to_the_end_and_returns():
+    decision = _PLAN[-1]
+    answer = "\n\n".join(f"Paragraph {i} of the recommendation." for i in range(80))
+    answer += '\n\n```json\n{"answer": "' + ("long value " * 20) + 'END-OF-OUTPUT"}\n```'
+    snapshot = TreeSnapshot(
+        root_ids=[decision.node_id],
+        specs={decision.node_id: decision.model_copy(update={"parent_ids": []})},
+        statuses={decision.node_id: NodeStatus.PASSED},
+        results={decision.node_id: NodeResult(
+            node_id=decision.node_id, output=answer, tokens_in=1, tokens_out=1,
+            latency_ms=1, model_id="fake", prompt_version="v",
+        )},
+    )
+
+    async def scenario():
+        app = KurogamiApp("goal", snapshot=snapshot)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.press("a", "end")
+            await _until(pilot, lambda: app.run_screen.query_one("#output-scroll", VerticalScroll).scroll_y > 0)
+            assert app.run_screen.query_one("MarkdownFence > Label").region.height > 3
+            await pilot.press("a", "f")
+            await _until(pilot, lambda: isinstance(app.screen, OutputScreen))
+            scroll = app.screen.query_one("#reader-scroll", VerticalScroll)
+            assert app.focused is scroll
+            await pilot.press("end")
+            await _until(pilot, lambda: scroll.max_scroll_y > 0 and scroll.scroll_y == scroll.max_scroll_y)
+            assert app.screen.query_one("MarkdownFence > Label").region.height > 3
+            await pilot.press("escape")
+            assert app.screen is app.run_screen
 
     asyncio.run(scenario())
 

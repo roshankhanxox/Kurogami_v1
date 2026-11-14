@@ -8,7 +8,6 @@ anthropic fails with a clear error rather than pretending to work.
 import json
 import os
 import uuid
-import webbrowser
 from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated, Any
@@ -30,7 +29,7 @@ from kurogami.agents.localiser import Localiser
 from kurogami.agents.planner import BlueprintError, Planner
 from kurogami.agents.rules import RuleChecker
 from kurogami.agents.verifier import Verifier
-from kurogami.cli.export import export_run
+from kurogami.cli.export import export_run, open_browser
 from kurogami.cli.home import HomeApp, Settings
 from kurogami.cli.interrupt import CliInterrupt
 from kurogami.cli.render import render_trace, render_tree
@@ -315,7 +314,8 @@ def tui(
     if open_snapshot is not None:
         saved = json.loads(open_snapshot.read_text())
         KurogamiApp(
-            saved["goal"], snapshot=TreeSnapshot.model_validate(saved["snapshot"])
+            saved["goal"], snapshot=TreeSnapshot.model_validate(saved["snapshot"]),
+            snapshot_path=open_snapshot,
         ).run()
         return
     goal = _goal_text(goal_file, goal_text)
@@ -330,7 +330,9 @@ def tui(
         _save_snapshot(trace_path, goal, report)
         return report
 
-    app_ = KurogamiApp(goal, start_run=start, review_plan=not no_review)
+    app_ = KurogamiApp(
+        goal, start_run=start, review_plan=not no_review, snapshot_path=_snapshot_path(trace_path)
+    )
     report = app_.run()
     console.print(f"trace written to {trace_path}")
     if report is None:
@@ -348,8 +350,8 @@ def export(
     """Write a run as an interactive HTML graph -- every dependency edge drawn."""
     path = export_run(snapshot, out)
     console.print(f"wrote {path}")
-    if open_it:
-        webbrowser.open(path.resolve().as_uri())
+    if open_it and not open_browser(path):
+        console.print(f"Open this file in your browser: {path.resolve()}")
 
 
 @app.command()

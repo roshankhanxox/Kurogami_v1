@@ -6,7 +6,6 @@ place adapters are constructed, CLAUDE.md R1).
 """
 
 import json
-import webbrowser
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -21,7 +20,7 @@ from textual.screen import Screen
 from textual.widgets import Footer, Header, Input, Label, OptionList, Static
 from textual.widgets.option_list import Option
 
-from kurogami.cli.export import export_run
+from kurogami.cli.export import export_run, open_browser
 from kurogami.cli.tui import RunScreen
 from kurogami.contracts import TreeSnapshot
 from kurogami.engine.runner import RunReport
@@ -206,8 +205,10 @@ class HomeScreen(Screen[None]):
         if options.highlighted is None or options.highlighted >= len(self._runs):
             return
         page = export_run(self._runs[options.highlighted])
-        webbrowser.open(page.resolve().as_uri())
-        self.notify(f"Opened {page.name} in your browser.")
+        if open_browser(page):
+            self.notify(f"Opened {page.name} in your browser.")
+        else:
+            self.notify(f"Open this file in your browser: {page.resolve()}", timeout=15)
 
     def action_focus_ask(self) -> None:
         ask = self.query_one("#ask", Input)
@@ -219,6 +220,7 @@ class HomeScreen(Screen[None]):
 
 class HomeApp(App[None]):
     TITLE = "kurogami"
+    BINDINGS = [Binding("ctrl+q", "quit", "Quit", priority=True)]  # noqa: RUF012
 
     def __init__(self, settings: Settings, factory: StartFactory) -> None:
         super().__init__()
@@ -226,3 +228,9 @@ class HomeApp(App[None]):
 
     def on_mount(self) -> None:
         self.push_screen(self._home)
+
+    async def action_quit(self) -> None:
+        for screen in self.screen_stack:
+            if isinstance(screen, RunScreen):
+                screen.request_cancel()
+        self.exit()
