@@ -1,0 +1,17 @@
+{
+  "goal_id": "g001",
+  "raw_text": "I built a tool that helps freelance designers in India send invoices and chase late payments. Should I launch it, and how?",
+  "split": "dev",
+  "tier": "natural",
+  "expected_depth": 4,
+  "expected_nodes": 10,
+  "ground_truth": {
+    "constraints": [
+      "Indian freelance designers are a price-sensitive segment; willingness-to-pay for this category sits well below premium/enterprise SaaS pricing norms.",
+      "Any differentiation strategy that leans on premium or compliance-heavy positioning risks pricing tiers that exceed the segment's willingness-to-pay ceiling.",
+      "A valid pricing decision must be traceable to, and consistent with, the willingness-to-pay ceiling established during market sizing."
+    ],
+    "notes": "The contradiction (premium differentiation -> pricing tiers that violate the WTP ceiling established by market sizing) is expected to arise naturally from the tree, not be planted. See docs/IMPLEMENTATION_PLAN.md §0.1."
+  },
+  "planted_fault": null
+}

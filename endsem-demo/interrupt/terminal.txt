@@ -1,0 +1,27 @@
+
+-- paused at a0 (a0) --
+Enter one constraint per line. Blank line to finish.
+> > Should I launch my invoicing tool?
+├── a0 a0 (passed)
+│   └── a1 a1 (passed)
+│       ├── a2 a2 (passed)
+│       │   └── a3 a3 (passed)
+│       │       └── final final (passed)
+│       └── c0 c0 (passed)
+│           └── c1 c1 (passed)
+│               └── c2 c2 (passed)
+│                   └── final final (passed)
+└── b0 b0 (passed)
+    └── b1 b1 (passed)
+        └── c1 c1 (passed)
+            └── c2 c2 (passed)
+                └── final final (passed)
+trace written to 
+traces/endsem-demo/controlled/interrupt/trace/36c6b48d-c331-4c46-b7d7-40079ddfd0
+be.jsonl
+every LLM call is recorded in 
+traces/endsem-demo/controlled/interrupt/trace/36c6b48d-c331-4c46-b7d7-40079ddfd0
+be.calls.jsonl
+10 active node(s), max depth 5.
+Final recommendation
+Recommendation: use email only.

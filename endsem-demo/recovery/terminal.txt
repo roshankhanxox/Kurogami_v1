@@ -1,0 +1,25 @@
+Should I launch my invoicing tool?
+├── a0 a0 (passed)
+│   ├── a1 a1 (invalidated)
+│   └── a1~r1 a1 (passed)
+│       ├── a2 a2 (passed)
+│       │   └── a3 a3 (passed)
+│       │       └── final final (passed)
+│       └── c0 c0 (passed)
+│           └── c1 c1 (passed)
+│               └── c2 c2 (passed)
+│                   └── final final (passed)
+└── b0 b0 (passed)
+    └── b1 b1 (passed)
+        └── c1 c1 (passed)
+            └── c2 c2 (passed)
+                └── final final (passed)
+trace written to 
+traces/endsem-demo/controlled/recovery/trace/aafd2c0a-14f6-4514-9714-4764acfed12
+6.jsonl
+every LLM call is recorded in 
+traces/endsem-demo/controlled/recovery/trace/aafd2c0a-14f6-4514-9714-4764acfed12
+6.calls.jsonl
+10 active node(s), max depth 5.
+Final recommendation
+Analysis.
