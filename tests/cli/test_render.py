@@ -28,6 +28,17 @@ def test_render_tree_shows_every_fixture_node():
         assert node_id in output
 
 
+def test_render_dependencies_list_shared_tasks_once():
+    snapshot = build_fixture_tree().snapshot()
+    shared = next(spec for spec in snapshot.specs.values() if len(spec.parent_ids) > 1)
+    console, buffer = _console()
+    render_tree(snapshot, console)
+
+    rows = [line.split() for line in buffer.getvalue().splitlines()]
+    [row] = [row for row in rows if row and row[0] == shared.node_id]
+    assert set(shared.parent_ids) <= {cell.rstrip(",") for cell in row[1:]}
+
+
 def test_render_tree_shows_invalidated_status_after_backtrack():
     from kurogami.contracts import FailureReason
     from kurogami.engine import backtrack

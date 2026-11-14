@@ -19,6 +19,10 @@ For every item, write a node with:
   least forty words and specific to this goal. The agent is automatically shown
   the answers of the items it depends on, so tell it how to use them -- do not
   restate them or invent them.
+  The agent can use supplied context and, for research nodes, any public snippets
+  made available. It cannot conduct interviews, surveys or outreach. If needed
+  evidence is unavailable, ask for labeled proxies or assumptions, or an explicit
+  statement of the gap, and make the checks accept that disclosure where appropriate.
 - pass_condition.assertions: a list of valid Python boolean expressions,
   evaluated literally against the node's own structured output. Never write a
   natural-language sentence here. An expression may only use the name

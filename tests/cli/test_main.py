@@ -9,12 +9,14 @@ Interpreter, Planner, Executor, RuleChecker, Verifier and Runner are all real.
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
 import pytest
 from typer.testing import CliRunner
 
+from kurogami.adapters.llm.cached import CachedLLM
 from kurogami.agents._prompt_loader import load_prompt
 from kurogami.cli import main as cli_main
 from kurogami.cli.main import app
@@ -196,9 +198,143 @@ def test_run_completes_the_planned_tree(tmp_path, use_llm):
     )
 
     assert result.exit_code == 0, result.stdout
+    assert "10 active node(s), max depth 5" in result.stdout
+    assert "Scripted · Test model" in result.stdout
+    assert "Task dependencies" in result.stdout
+    assert "Depends on" in result.stdout
+    assert "PASS  a0" in result.stdout
+    assert "Final recommendation" in result.stdout
     records = _trace_records(trace_dir)
     assert sorted(r["node_id"] for r in records) == sorted(_SHAPE)
     assert all(r["verifier_verdict"] == "PASS" for r in records)
+
+
+def test_open_trace_exports_latest_run_with_all_parents_and_calls(tmp_path, use_llm, monkeypatch):
+    use_llm(_fake())
+    (tmp_path / "plan-only.calls.jsonl").write_text("")
+    result = runner.invoke(app, ["run", "--text", RAW_TEXT, "--trace-dir", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert "kurogami open-trace" in result.output
+
+    opened = []
+    monkeypatch.setattr(cli_main, "open_browser", lambda page: opened.append(page) or True)
+    result = runner.invoke(app, ["open-trace", "--trace-dir", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    [page] = opened
+    html = page.read_text(encoding="utf-8")
+    assert RAW_TEXT in html
+    assert 'aria-label="Task dependency graph"' in html
+    assert '<a href="#task-a3">a3</a>, <a href="#task-c2">c2</a>' in html
+    assert "Model call stack (23)" in html
+
+    result = runner.invoke(app, ["open-trace", "--trace-dir", str(tmp_path), "--no-browser"])
+    assert result.exit_code == 0, result.output
+    assert opened == [page]
+
+
+def test_run_requires_exactly_one_goal(tmp_path):
+    goal_file = _goal_file(tmp_path)
+    for options in ([], ["--text", " "], ["--text", RAW_TEXT, "--goal-file", str(goal_file)]):
+        result = runner.invoke(app, ["run", *options, "--trace-dir", str(tmp_path)])
+        assert result.exit_code == 2
+    goal_file.write_text('{"raw_text": 42}')
+    result = runner.invoke(app, ["run", "--goal-file", str(goal_file), "--trace-dir", str(tmp_path)])
+    assert result.exit_code == 2
+    assert "nonblank raw_text string" in result.output
+    assert not list(tmp_path.glob("*.jsonl"))
+
+
+def test_strict_offline_runs_from_a_recorded_cache_without_openai(tmp_path, monkeypatch):
+    cache_dir = tmp_path / "seeded-cache"
+    writer = CachedLLM(_fake(), model_id="demo", cache_dir=cache_dir)
+    with monkeypatch.context() as patch:
+        patch.setattr(cli_main, "_build_llm", lambda *args, **kwargs: writer)
+        times = iter([0.0, 1.0] * 60)
+        patch.setattr("kurogami.agents.executor.time", SimpleNamespace(monotonic=lambda: next(times)))
+        result = runner.invoke(
+            app,
+            ["run", "--text", RAW_TEXT, "--search", "none", "--trace-dir", str(tmp_path / "seed")],
+        )
+        assert result.exit_code == 0, result.output
+
+    def unexpected_provider(*args, **kwargs):
+        pytest.fail("offline mode constructed a remote provider")
+
+    monkeypatch.setattr(cli_main, "OpenAILLM", unexpected_provider)
+    monkeypatch.setattr(cli_main, "TavilySearch", unexpected_provider)
+    offline_options = [
+        "--llm", "openai", "--offline", "--model", "demo", "--cache-dir", str(cache_dir),
+        "--trace-dir", str(tmp_path / "offline"),
+    ]
+    before = {path.name: path.read_bytes() for path in cache_dir.iterdir()}
+    with monkeypatch.context() as patch:
+        patch.setattr("kurogami.agents.executor.time", SimpleNamespace(monotonic=lambda: 0.0))
+        result = runner.invoke(app, ["run", "--text", RAW_TEXT, *offline_options])
+    assert result.exit_code == 0, result.output
+    assert "Final recommendation" in result.stdout
+    result = runner.invoke(app, ["run", "--text", "Uncached goal", *offline_options])
+    assert result.exit_code == 1
+    assert "offline cache miss" in result.stdout
+    assert "exact constraint" in result.stdout
+    assert {path.name: path.read_bytes() for path in cache_dir.iterdir()} == before
+    result = runner.invoke(app, ["run", "--text", RAW_TEXT, *offline_options, "--search", "tavily"])
+    assert result.exit_code == 2
+
+
+class _ScenarioLLM(_SchemaFakeLLM):
+    def __init__(self, *, plant_fault: bool = False) -> None:
+        super().__init__(_fake()._by_schema)
+        self.plant_fault = plant_fault
+        self.planted = False
+
+    def complete(self, *, prompt, system=None, schema=None, temperature=0.0):
+        if schema is None:
+            output = "Analysis."
+            if "prompt for final " in prompt and "Use email only." in prompt:
+                output = "Recommendation: use email only."
+            return LLMResponse(text=output, tokens_in=1, tokens_out=1, latency_ms=0, model_id="fake")
+        if (self.plant_fault and not self.planted and schema.__name__ == "_VerifyResponse"
+                and '"node_id": "a1"' in prompt):
+            self.planted = True
+            verdict = schema.model_validate({
+                "verdict": "FAIL",
+                "reason": {
+                    "summary": "Planted test fault in the upstream premise",
+                    "violated": "semantic",
+                    "evidence": "Controlled verifier response",
+                    "suspect_node_ids": ["a0"],
+                },
+            })
+            return LLMResponse(
+                text=verdict.model_dump_json(), parsed=verdict,
+                tokens_in=1, tokens_out=1, latency_ms=0, model_id="fake",
+            )
+        return super().complete(prompt=prompt, system=system, schema=schema, temperature=temperature)
+
+
+def test_cli_recovers_from_a_planted_verifier_failure(tmp_path, use_llm):
+    use_llm(_ScenarioLLM(plant_fault=True))
+    result = runner.invoke(app, ["run", "--text", RAW_TEXT, "--trace-dir", str(tmp_path), "--verbose"])
+    assert result.exit_code == 0, result.output
+    records = _trace_records(tmp_path)
+    assert any(row["node_id"] == "a1" and row["backtrack_target"] == "a0" for row in records)
+    assert any(row["node_id"] == "a1~r1" and row["verifier_verdict"] == "PASS" for row in records)
+    assert sum(row["node_id"] == "b0" for row in records) == 1
+    assert "a1 -> backtrack to a0" in result.stdout
+    assert "Final recommendation" in result.stdout
+
+
+def test_cli_interrupt_changes_the_final_output(tmp_path, use_llm):
+    use_llm(_ScenarioLLM())
+    result = runner.invoke(
+        app,
+        ["run", "--text", RAW_TEXT, "--interrupt-at", "a0", "--trace-dir", str(tmp_path)],
+        input="Use email only.\n\n",
+    )
+    assert result.exit_code == 0, result.output
+    assert "paused at a0" in result.stdout
+    assert "Recommendation: use email only." in result.stdout
+    assert any(row["node_id"] == "a0" and row["human_interrupt"] for row in _trace_records(tmp_path))
 
 
 def test_a_node_that_keeps_failing_gives_up_and_the_rest_of_the_tree_still_runs(tmp_path, use_llm):

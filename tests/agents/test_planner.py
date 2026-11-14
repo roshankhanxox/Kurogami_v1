@@ -173,6 +173,33 @@ def test_plan_raises_when_the_blueprint_is_still_structurally_wrong():
         Planner(_ScriptedLLM([_scope(), missing, missing, missing])).plan(_goal())
 
 
+def test_plan_recovers_when_corrections_alternate_between_missing_ids_and_unbounded_checks():
+    """Live final_recommendation alternated between 'all insights' and no ancestor id."""
+    question = "Does it provide a clear recommendation and at least 3 actionable next steps?"
+    first = _blueprint()
+    first.nodes[-1] = first.nodes[-1].model_copy(
+        update={"pass_condition": PassCondition(assertions=[], semantic_check=question)}
+    )
+    correction = first.nodes[-1].model_copy(
+        update={"pass_condition": PassCondition(
+            assertions=[], semantic_check="Does it consider all insights from a3 and c2?"
+        )}
+    )
+    llm = _ScriptedLLM([
+        _scope(), first, _Blueprint(nodes=[correction]), _Blueprint(nodes=[first.nodes[-1]])
+    ])
+
+    nodes = {n.node_id: n for n in Planner(llm).plan(_goal())}
+
+    check = nodes["final"].pass_condition.semantic_check
+    assert check.startswith(question)
+    assert "consistent with the findings and constraints" in check
+    assert "a3, c2" in check
+    assert nodes["final"].parent_ids == ["a3", "c2"]
+    assert nodes["a0"].pass_condition == first.nodes[0].pass_condition
+    assert len(llm.prompts) == 4  # fallback makes no additional LLM call
+
+
 # --- validation rules ------------------------------------------------------------------
 
 

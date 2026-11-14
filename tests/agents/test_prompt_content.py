@@ -64,3 +64,12 @@ def test_interpret_prompt_requires_flagging_ambiguity_not_resolving_it():
 def test_plan_prompt_forbids_unbounded_completeness_checks():
     """Live incident: 'cover all major competitors' was unpassable."""
     assert "Never ask for unbounded completeness" in _normalized("plan")
+
+
+def test_planner_requests_disclosure_when_primary_evidence_is_unavailable():
+    assert "Do not make new interviews, surveys, private data, or outreach prerequisites" in (
+        _normalized("scope")
+    )
+    plan = _normalized("plan")
+    assert "It cannot conduct interviews, surveys or outreach" in plan
+    assert "make the checks accept that disclosure" in plan

@@ -190,6 +190,27 @@ class Planner:
             )
             fixed = {n.node_id: n for n in self._ask(prompt + note, _Blueprint).nodes}
             blueprint = _merge_corrections(blueprint, fixed, problems, _ids(scope))
+        # The graph already tells us which context the verifier must compare.
+        # After bounded corrections, supply a missing reference deterministically
+        # rather than aborting an otherwise valid investigation over its wording.
+        deps = {item.id: item.depends_on for item in scope}
+        for index, node in enumerate(blueprint):
+            parents = deps.get(node.node_id, [])
+            check = node.pass_condition.semantic_check
+            if parents and not any(_names(check, a) for a in _ancestors(node.node_id, deps)):
+                _log.warning("adding dependency consistency check to %s", node.node_id)
+                blueprint[index] = node.model_copy(
+                    update={
+                        "pass_condition": node.pass_condition.model_copy(
+                            update={
+                                "semantic_check": (
+                                    f"{check} Is the output consistent with the findings and "
+                                    f"constraints in ancestor context for {', '.join(parents)}?"
+                                )
+                            }
+                        )
+                    }
+                )
         # Unevaluable assertions left after the corrections are dropped (and logged);
         # structural problems cannot be.
         structural = _blueprint_problems(blueprint, scope, strict=False)

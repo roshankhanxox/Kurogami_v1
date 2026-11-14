@@ -15,14 +15,21 @@ from pydantic import BaseModel
 from kurogami.contracts.ports import LLMPort, LLMResponse
 
 
+class CacheMissError(RuntimeError):
+    """A requested completion is missing from a read-only cache."""
+
+
 class CachedLLM:
     """Satisfies LLMPort by wrapping another LLMPort with an on-disk cache."""
 
-    def __init__(self, inner: LLMPort, *, model_id: str, cache_dir: str | Path = ".cache/llm") -> None:
+    def __init__(
+        self, inner: LLMPort | None, *, model_id: str, cache_dir: str | Path = ".cache/llm"
+    ) -> None:
         self._inner = inner
         self._model_id = model_id
         self._cache_dir = Path(cache_dir)
-        self._cache_dir.mkdir(parents=True, exist_ok=True)
+        if inner is not None:
+            self._cache_dir.mkdir(parents=True, exist_ok=True)
 
     def complete(
         self,
@@ -50,6 +57,8 @@ class CachedLLM:
                 model_id=cached["model_id"],
             )
 
+        if self._inner is None:
+            raise CacheMissError(f"offline cache miss for {self._model_id}: {path}")
         response = self._inner.complete(prompt=prompt, system=system, schema=schema, temperature=temperature)
         path.write_text(
             json.dumps(

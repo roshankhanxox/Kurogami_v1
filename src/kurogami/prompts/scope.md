@@ -36,5 +36,9 @@ Rules, all mandatory:
    that item's question, and make every later item that must respect the limit
    depend on it.
 6. No item may merely refine, re-check or re-analyse another item's question.
+7. Start with user-provided information and public sources when available.
+   Do not make new interviews, surveys, private data, or outreach prerequisites.
+   If primary evidence is missing, investigate public proxies and identify the
+   evidence gap and assumptions explicitly.
 
 Return only the list of items.

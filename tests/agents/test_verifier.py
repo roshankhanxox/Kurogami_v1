@@ -41,7 +41,7 @@ def _prompt_for(node: NodeSpec, result: NodeResult, context: dict[str, str]) -> 
 
     return load_prompt("verify").format(
         node_json=node.model_dump_json(indent=2),
-        result_json=result.model_dump_json(indent=2),
+        result_json=result.model_dump_json(indent=2, exclude={"latency_ms"}),
         context_json=json.dumps(context, indent=2),
         semantic_check=node.pass_condition.semantic_check,
     )

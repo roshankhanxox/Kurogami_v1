@@ -24,7 +24,7 @@ class Verifier:
         template = load_prompt("verify")
         prompt = template.format(
             node_json=node.model_dump_json(indent=2),
-            result_json=result.model_dump_json(indent=2),
+            result_json=result.model_dump_json(indent=2, exclude={"latency_ms"}),
             context_json=json.dumps(context, indent=2),
             semantic_check=node.pass_condition.semantic_check,
         )
